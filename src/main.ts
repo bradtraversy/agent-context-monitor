@@ -51,7 +51,10 @@ const WARNING = 70;
 const CRITICAL = 90;
 
 const usagePanel = document.querySelector<HTMLElement>("#panel-usage")!;
-const contextPanel = document.querySelector<HTMLElement>("#panel-context")!;
+const chatList = document.querySelector<HTMLElement>("#chat-list")!;
+const filterButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-provider]")];
+const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
+let providerFilter = localStorage.getItem("providerFilter") ?? "all";
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
@@ -172,10 +175,21 @@ function chatRow(c: ChatContext): string {
 function render() {
   if (!snapshot) return;
   usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
-  const rows = snapshot.chats.map(chatRow).join("");
-  contextPanel.innerHTML =
-    rows || `<p class="empty">No open Claude chats or Codex chats active in the last 30 minutes.</p>`;
+  const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
+  const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
+  chatList.innerHTML =
+    chats.map(chatRow).join("") || `<p class="empty">No open ${who} chats right now.</p>`;
 }
+
+function setFilter(provider: string) {
+  providerFilter = provider;
+  localStorage.setItem("providerFilter", provider);
+  for (const b of filterButtons) b.setAttribute("aria-checked", String(b.dataset.provider === provider));
+  render();
+}
+
+for (const b of filterButtons) b.addEventListener("click", () => setFilter(b.dataset.provider!));
+setFilter(providerFilter);
 
 function selectTab(tab: HTMLButtonElement) {
   for (const t of tabs) {

@@ -72,6 +72,34 @@ nav {
   cursor: pointer;
 }
 
+.filter {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.filter button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.filter button[aria-checked="true"] {
+  color: var(--text);
+  background: var(--track);
+}
+
+.filter button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 [role="tab"][aria-selected="true"] {
   color: var(--text);
   background: var(--track);

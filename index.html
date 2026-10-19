@@ -19,7 +19,14 @@
     </header>
     <main>
       <section role="tabpanel" id="panel-usage" aria-labelledby="tab-usage"></section>
-      <section role="tabpanel" id="panel-context" aria-labelledby="tab-context" hidden></section>
+      <section role="tabpanel" id="panel-context" aria-labelledby="tab-context" hidden>
+        <div class="filter" role="radiogroup" aria-label="Show chats from">
+          <button role="radio" data-provider="all" aria-checked="true">All</button>
+          <button role="radio" data-provider="claude" aria-checked="false">Claude</button>
+          <button role="radio" data-provider="codex" aria-checked="false">Codex</button>
+        </div>
+        <div id="chat-list"></div>
+      </section>
     </main>
   </body>
 </html>
