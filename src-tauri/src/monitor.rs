@@ -6,8 +6,9 @@ use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::claude::{self, ClaudeSource};
+use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
-use crate::model::{ChatContext, ContextMeasure, Level, Snapshot};
+use crate::model::{ChatContext, Snapshot};
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -21,7 +22,7 @@ pub fn start(app: AppHandle) {
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
 
     // The Claude request is slow and infrequent, so it runs apart from the file loop.
-    let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home)));
+    let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home.clone())));
     {
         let claude = Arc::clone(&claude);
         thread::spawn(move || {
@@ -36,14 +37,16 @@ pub fn start(app: AppHandle) {
 
     thread::spawn(move || {
         let mut codex = CodexSource::new(codex_home);
+        let mut claude_sessions = ClaudeSessions::new(claude_home);
         loop {
             let now = SystemTime::now();
             codex.refresh(now);
             let usage = vec![claude.lock().unwrap().usage(now), codex.usage(now)];
-            let mut chats = codex.chats(now);
+            let mut chats = claude_sessions.chats(now);
+            chats.extend(codex.chats(now));
             chats.sort_by(|a, b| {
                 urgency(b)
-                    .cmp(&urgency(a))
+                    .total_cmp(&urgency(a))
                     .then(b.last_activity.cmp(&a.last_activity))
             });
             publish(&app, Snapshot::new(usage, chats));
@@ -65,11 +68,11 @@ fn publish(app: &AppHandle, snapshot: Snapshot) {
     let _ = app.emit("snapshot", &snapshot);
 }
 
-fn urgency(chat: &ChatContext) -> Level {
+fn urgency(chat: &ChatContext) -> f64 {
     chat.context
         .as_ref()
-        .map(ContextMeasure::level)
-        .unwrap_or_default()
+        .and_then(|c| c.used_percent)
+        .unwrap_or(-1.0)
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {

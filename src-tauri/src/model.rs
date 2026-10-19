@@ -101,17 +101,17 @@ pub enum Confidence {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ContextMeasure {
     pub used_tokens: u64,
-    pub context_window: u64,
-    pub used_percent: f64,
+    pub context_window: Option<u64>,
+    pub used_percent: Option<f64>,
     pub confidence: Confidence,
     pub observed_at: String,
 }
 
 impl ContextMeasure {
     pub fn level(&self) -> Level {
-        match self.confidence {
-            Confidence::Confirmed => Level::from_used_percent(self.used_percent),
-            Confidence::Estimated => Level::Unknown,
+        match (self.confidence, self.used_percent) {
+            (Confidence::Confirmed, Some(used)) => Level::from_used_percent(used),
+            _ => Level::Unknown,
         }
     }
 }
@@ -128,6 +128,14 @@ pub struct ChatContext {
     /// Unix seconds of the last write to the session file.
     pub last_activity: i64,
     pub subagents: usize,
+    pub activity: Option<Activity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Activity {
+    Working,
+    Idle,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]

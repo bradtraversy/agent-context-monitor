@@ -21,8 +21,8 @@ interface ProviderUsage {
 
 interface ContextMeasure {
   used_tokens: number;
-  context_window: number;
-  used_percent: number;
+  context_window: number | null;
+  used_percent: number | null;
   confidence: "confirmed" | "estimated";
   observed_at: string;
 }
@@ -37,6 +37,7 @@ interface ChatContext {
   context: ContextMeasure | null;
   last_activity: number;
   subagents: number;
+  activity: "working" | "idle" | null;
 }
 
 interface Snapshot {
@@ -138,20 +139,24 @@ function chatRow(c: ChatContext): string {
   const project = c.project ? `<span>${escape(c.project)}</span>` : "";
   const model = c.model ? `<span>${escape(c.model)}</span>` : "";
   const subagents = c.subagents ? `<span>${c.subagents} subagent${c.subagents > 1 ? "s" : ""}</span>` : "";
-  const active = Date.now() / 1000 - c.last_activity < 120;
-  const state = `<span class="state" data-active="${active}">${active ? "Active" : "Idle"} · ${ago(c.last_activity)}</span>`;
+  const recent = Date.now() / 1000 - c.last_activity < 120;
+  const working = c.activity ? c.activity === "working" : recent;
+  const state = `<span class="state" data-active="${working}">${working ? "Working" : "Idle"} · ${ago(c.last_activity)}</span>`;
 
   let gauge = `<div class="sub">Context unknown until the next reply</div>`;
-  if (c.context) {
-    const m = c.context;
-    const estimated = m.confidence === "estimated";
-    const level = estimated ? "unknown" : levelFor(m.used_percent);
+  const m = c.context;
+  if (m && m.used_percent !== null && m.context_window !== null) {
+    const level = levelFor(m.used_percent);
     const left = Math.max(0, 100 - m.used_percent);
     const warn = LEVEL_TEXT[level] ? ` <strong class="tag">${LEVEL_TEXT[level]}</strong>` : "";
-    gauge = `<div class="limit-head"><span>${estimated ? "Estimated" : "Context"}</span>
+    const estimated = m.confidence === "estimated" ? " (estimated)" : "";
+    gauge = `<div class="limit-head"><span>Context</span>
         <span><b>${left.toFixed(0)}% left</b>${warn}</span></div>
       ${bar(m.used_percent, level)}
-      <div class="sub">${m.used_tokens.toLocaleString()} of ${m.context_window.toLocaleString()} tokens</div>`;
+      <div class="sub">${m.used_tokens.toLocaleString()} of ${m.context_window.toLocaleString()} tokens${estimated}</div>`;
+  } else if (m) {
+    gauge = `<div class="limit-head"><span>Context</span><span><b>${m.used_tokens.toLocaleString()} tokens</b></span></div>
+      <div class="sub">Window size unknown, so no percentage</div>`;
   }
 
   return `<article class="card chat" title="${escape(c.cwd ?? "")}">
@@ -167,8 +172,7 @@ function render() {
   usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
   const rows = snapshot.chats.map(chatRow).join("");
   contextPanel.innerHTML =
-    (rows || `<p class="empty">No Codex chats active in the last 30 minutes.</p>`) +
-    `<p class="footnote">Claude chats are coming next.</p>`;
+    rows || `<p class="empty">No open Claude chats or Codex chats active in the last 30 minutes.</p>`;
 }
 
 function selectTab(tab: HTMLButtonElement) {

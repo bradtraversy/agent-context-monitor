@@ -5,7 +5,9 @@ A small tray app that shows how much Claude Code and Codex usage you have left t
 ## What it reads
 
 - Codex: `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Usage limits come from the newest `token_count` record. Windows are identified by length, so a plan with only a weekly limit shows "Not reported" for the session limit. Chat titles come from `session_index.jsonl`.
-- Claude: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), used for one read-only usage request to Anthropic every five minutes. This is the app's only network call. The token is never logged or stored. If the login is missing or expired, Claude usage shows as unknown. Claude chats in the Context tab are not supported yet.
+- Claude: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), used for one read-only usage request to Anthropic every five minutes. This is the app's only network call. The token is never logged or stored. If the login is missing or expired, Claude usage shows as unknown.
+
+- Claude chats: Claude Code's live session registry in `~/.claude/sessions` lists open chats with their name and busy or idle state. Context tokens come from the last reply in each transcript. Transcripts do not record the context window, so a percentage appears only for models requested with a `[1m]` window. Other Claude chats show a token count.
 
 Only usage and session metadata are kept. Message content is never stored or displayed.
 

@@ -1,4 +1,5 @@
 mod claude;
+mod claude_sessions;
 mod codex;
 mod jsonl;
 mod model;

@@ -209,6 +209,7 @@ impl CodexSource {
                     provider: PROVIDER,
                     title: self.titles.get(&id).cloned(),
                     subagents: subagents.get(id.as_str()).copied().unwrap_or(0),
+                    activity: None,
                     project: f.cwd.as_deref().and_then(project_label),
                     cwd: f.cwd.clone(),
                     model: f.model.clone(),
@@ -266,8 +267,8 @@ impl SessionFile {
             };
             self.context = Some(ContextMeasure {
                 used_tokens: usage.total_tokens,
-                context_window: window,
-                used_percent: (usage.total_tokens as f64 / window as f64 * 100.0).min(100.0),
+                context_window: Some(window),
+                used_percent: Some((usage.total_tokens as f64 / window as f64 * 100.0).min(100.0)),
                 confidence,
                 observed_at: observed_at.clone(),
             });
@@ -408,7 +409,7 @@ mod tests {
         let f = file_from(&[meta("abc", ""), token("t1", 25_000, 24_000, 1_000, "null")]);
         let ctx = f.context.unwrap();
         assert_eq!(ctx.used_tokens, 25_000);
-        assert_eq!(ctx.used_percent, 25.0);
+        assert_eq!(ctx.used_percent, Some(25.0));
         assert_eq!(ctx.confidence, Confidence::Confirmed);
 
         let f = file_from(&[meta("abc", ""), token("t2", 9_000, 30_000, 1_000, "null")]);
