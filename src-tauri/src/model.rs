@@ -128,6 +128,8 @@ pub struct ChatContext {
     pub last_activity: i64,
     pub subagents: usize,
     pub activity: Option<Activity>,
+    /// Where the chat runs, such as the terminal or the desktop app.
+    pub surface: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]

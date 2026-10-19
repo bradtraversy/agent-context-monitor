@@ -31,6 +31,10 @@ struct RegistryEntry {
     #[serde(rename = "procStart")]
     proc_start: Option<String>,
     name: Option<String>,
+    /// "derived" names are auto-generated from the folder, like `brad-b4`.
+    #[serde(rename = "nameSource")]
+    name_source: Option<String>,
+    entrypoint: Option<String>,
     status: Option<String>,
     #[serde(rename = "updatedAt")]
     updated_at_ms: Option<i64>,
@@ -124,7 +128,10 @@ impl ClaudeSessions {
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: entry.name.clone().filter(|n| !n.trim().is_empty()),
+                title: entry.name.clone().filter(|n| {
+                    !n.trim().is_empty() && entry.name_source.as_deref() != Some("derived")
+                }),
+                surface: entry.entrypoint.as_deref().map(surface_label),
                 project: entry.cwd.as_deref().and_then(project_label),
                 cwd: entry.cwd.clone(),
                 model: transcript.model.clone(),
@@ -232,6 +239,14 @@ fn window_from_model(model: &str) -> Option<u64> {
         Some(TWO_HUNDRED_K)
     } else {
         None
+    }
+}
+
+fn surface_label(entrypoint: &str) -> String {
+    match entrypoint {
+        "cli" => "Terminal".into(),
+        "claude-desktop" => "Desktop app".into(),
+        other => other.replace(['-', '_'], " "),
     }
 }
 
@@ -379,6 +394,8 @@ mod tests {
             cwd: Some("/home/u/Code/my.app".into()),
             proc_start: None,
             name: None,
+            name_source: None,
+            entrypoint: None,
             status: None,
             updated_at_ms: None,
         };

@@ -38,6 +38,7 @@ interface ChatContext {
   last_activity: number;
   subagents: number;
   activity: "working" | "idle" | null;
+  surface: string | null;
 }
 
 interface Snapshot {
@@ -135,8 +136,9 @@ function usageCard(u: ProviderUsage): string {
 }
 
 function chatRow(c: ChatContext): string {
-  const title = c.title ?? `Session ${c.id.slice(-8)}`;
+  const title = c.title ?? c.project ?? `Session ${c.id.slice(-8)}`;
   const project = c.project ? `<span>${escape(c.project)}</span>` : "";
+  const surface = c.surface ? `<span>${escape(c.surface)}</span>` : "";
   const model = c.model ? `<span>${escape(c.model)}</span>` : "";
   const subagents = c.subagents ? `<span>${c.subagents} subagent${c.subagents > 1 ? "s" : ""}</span>` : "";
   const recent = Date.now() / 1000 - c.last_activity < 120;
@@ -161,7 +163,7 @@ function chatRow(c: ChatContext): string {
 
   return `<article class="card chat" title="${escape(c.cwd ?? "")}">
     <div class="chat-head"><span class="provider">${escape(c.provider)}</span><h3>${escape(title)}</h3></div>
-    <div class="chips">${project}${model}${subagents}</div>
+    <div class="chips">${project}${surface}${model}${subagents}</div>
     ${gauge}
     ${state}
   </article>`;

@@ -210,6 +210,7 @@ impl CodexSource {
                     title: self.titles.get(&id).cloned(),
                     subagents: subagents.get(id.as_str()).copied().unwrap_or(0),
                     activity: None,
+                    surface: None,
                     project: f.cwd.as_deref().and_then(project_label),
                     cwd: f.cwd.clone(),
                     model: f.model.clone(),
