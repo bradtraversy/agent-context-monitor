@@ -109,10 +109,9 @@ pub struct ContextMeasure {
 
 impl ContextMeasure {
     pub fn level(&self) -> Level {
-        match (self.confidence, self.used_percent) {
-            (Confidence::Confirmed, Some(used)) => Level::from_used_percent(used),
-            _ => Level::Unknown,
-        }
+        self.used_percent
+            .map(Level::from_used_percent)
+            .unwrap_or_default()
     }
 }
 

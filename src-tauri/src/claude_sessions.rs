@@ -2,8 +2,8 @@
 //!
 //! Claude Code registers each running session in `~/.claude/sessions/<pid>.json`.
 //! Context comes from the last assistant usage in the session transcript. Transcripts
-//! do not record the context window, so it is known only when the requested model
-//! names it (the `[1m]` suffix); otherwise only the token count is shown.
+//! do not record the context window, so it is estimated from the model name, and
+//! only the token count is shown for models with no known window.
 
 use std::collections::HashMap;
 use std::fs;
@@ -17,6 +17,7 @@ use crate::model::{Activity, ChatContext, Confidence, ContextMeasure, unix_secs}
 
 const PROVIDER: &str = "claude";
 const ONE_MILLION: u64 = 1_000_000;
+const TWO_HUNDRED_K: u64 = 200_000;
 /// Used when liveness cannot be checked against the process table.
 #[cfg(not(target_os = "linux"))]
 const REGISTRY_FRESHNESS_SECS: i64 = 30 * 60;
@@ -218,8 +219,20 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
     }
 }
 
+/// Windows observed from Claude Code 2.1.302 on 2026-10-18: Opus and Sonnet 5.x
+/// run with 1M by default and Haiku with 200k. Unlisted models stay unknown.
 fn window_from_model(model: &str) -> Option<u64> {
-    model.ends_with("[1m]").then_some(ONE_MILLION)
+    if model.ends_with("[1m]") {
+        return Some(ONE_MILLION);
+    }
+    let id = model.strip_prefix("claude-").unwrap_or(model);
+    if id.starts_with("opus-5") || id.starts_with("sonnet-5") {
+        Some(ONE_MILLION)
+    } else if id.starts_with("haiku") {
+        Some(TWO_HUNDRED_K)
+    } else {
+        None
+    }
 }
 
 fn live_sessions(dir: &Path, now: SystemTime) -> Vec<RegistryEntry> {
@@ -310,13 +323,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_window_keeps_tokens_without_a_percentage() {
-        let ctx = read(&[assistant("claude-sonnet-5-5", 10, 990, "")])
-            .context
-            .unwrap();
-        assert_eq!(ctx.used_tokens, 1_000);
-        assert_eq!(ctx.context_window, None);
-        assert_eq!(ctx.used_percent, None);
+    fn window_is_estimated_from_the_model_name() {
+        let window = |model| read(&[assistant(model, 10, 990, "")]).context.unwrap();
+        assert_eq!(
+            window("claude-sonnet-5-5").context_window,
+            Some(ONE_MILLION)
+        );
+        assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
+        let unknown = window("some-future-model");
+        assert_eq!(unknown.used_tokens, 1_000);
+        assert_eq!(unknown.context_window, None);
+        assert_eq!(unknown.used_percent, None);
     }
 
     #[test]
