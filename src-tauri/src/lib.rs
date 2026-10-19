@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod jsonl;
 mod model;
 mod monitor;
 mod tray;
