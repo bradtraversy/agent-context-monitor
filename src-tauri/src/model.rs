@@ -78,6 +78,11 @@ pub struct ProviderUsage {
 pub const LIVE_REFRESH_AFTER_SECS: i64 = 4 * 60;
 /// No provider's usage may be older than this; older readings are shown as stale.
 pub const USAGE_STALE_AFTER_SECS: i64 = 5 * 60;
+/// The Context tab lists chats used within this window, newest first.
+pub const RECENT_CHAT_SECS: i64 = 24 * 60 * 60;
+/// Only chats used this recently color the tray, so a finished chat near its limit
+/// does not keep it red all day.
+pub const TRAY_CHAT_SECS: i64 = 30 * 60;
 
 impl ProviderUsage {
     pub fn unknown(provider: &'static str, name: &'static str, note: impl Into<String>) -> Self {
@@ -169,13 +174,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub fn new(usage: Vec<ProviderUsage>, chats: Vec<ChatContext>) -> Self {
+    pub fn new(usage: Vec<ProviderUsage>, chats: Vec<ChatContext>, now: SystemTime) -> Self {
         let level = usage
             .iter()
             .map(ProviderUsage::level)
             .chain(
                 chats
                     .iter()
+                    .filter(|c| unix_secs(now) - c.last_activity <= TRAY_CHAT_SECS)
                     .filter_map(|c| c.context.as_ref().map(ContextMeasure::level)),
             )
             .max()
@@ -240,5 +246,33 @@ mod tests {
         let old = usage.with_staleness(at(observed + 21 * 60 * 60));
         assert!(old.stale);
         assert_eq!(old.level(), Level::Unknown);
+    }
+
+    #[test]
+    fn only_recent_chats_color_the_tray() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let chat = |age: i64| ChatContext {
+            provider: "x",
+            id: age.to_string(),
+            title: None,
+            project: None,
+            cwd: None,
+            model: None,
+            context: Some(ContextMeasure {
+                used_tokens: 95,
+                context_window: Some(100),
+                used_percent: Some(95.0),
+                confidence: Confidence::Confirmed,
+                observed_at: String::new(),
+            }),
+            last_activity: unix_secs(now) - age,
+            subagents: 0,
+            activity: None,
+            surface: None,
+        };
+        let old = Snapshot::new(Vec::new(), vec![chat(2 * 60 * 60)], now);
+        assert_eq!(old.level, Level::Unknown);
+        let busy = Snapshot::new(Vec::new(), vec![chat(60)], now);
+        assert_eq!(busy.level, Level::Critical);
     }
 }

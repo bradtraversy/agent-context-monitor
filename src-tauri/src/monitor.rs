@@ -10,7 +10,7 @@ use crate::claude::ClaudeSource;
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
 use crate::codex_live;
-use crate::model::{ChatContext, LIVE_REFRESH_AFTER_SECS, Snapshot, unix_secs};
+use crate::model::{LIVE_REFRESH_AFTER_SECS, Snapshot, unix_secs};
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -83,12 +83,8 @@ pub fn start(app: AppHandle) {
             ];
             let mut chats = claude_sessions.chats(now);
             chats.extend(codex.chats(now));
-            chats.sort_by(|a, b| {
-                urgency(b)
-                    .total_cmp(&urgency(a))
-                    .then(b.last_activity.cmp(&a.last_activity))
-            });
-            publish(&app, Snapshot::new(usage, chats));
+            chats.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
+            publish(&app, Snapshot::new(usage, chats, now));
             thread::sleep(REFRESH_INTERVAL);
         }
     });
@@ -105,13 +101,6 @@ fn publish(app: &AppHandle, snapshot: Snapshot) {
     }
     tray::update(app, &snapshot);
     let _ = app.emit("snapshot", &snapshot);
-}
-
-fn urgency(chat: &ChatContext) -> f64 {
-    chat.context
-        .as_ref()
-        .and_then(|c| c.used_percent)
-        .unwrap_or(-1.0)
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {

@@ -184,7 +184,7 @@ function render() {
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
   const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
   chatList.innerHTML =
-    chats.map(chatRow).join("") || `<p class="empty">No open ${who} chats right now.</p>`;
+    chats.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`;
 }
 
 function setFilter(provider: string) {

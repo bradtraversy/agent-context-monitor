@@ -13,14 +13,14 @@ use serde::Deserialize;
 use crate::jsonl::{collect_jsonl, consume_lines, contains, project_label, read_from};
 
 use crate::model::{
-    ChatContext, Confidence, ContextMeasure, LimitWindow, ProviderUsage, UsageStatus, unix_secs,
+    ChatContext, Confidence, ContextMeasure, LimitWindow, ProviderUsage, RECENT_CHAT_SECS,
+    UsageStatus, unix_secs,
 };
 
 const PROVIDER: &str = "codex";
 const NAME: &str = "Codex";
 /// Files untouched for longer than a weekly window cannot hold the newest usage reading.
 const LOOKBACK: Duration = Duration::from_secs(8 * 24 * 60 * 60);
-pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30 * 60);
 /// Windows up to a day long are the rolling session limit; longer ones are weekly.
 const SESSION_WINDOW_MAX_MINUTES: u64 = 24 * 60;
 
@@ -204,7 +204,7 @@ impl CodexSource {
     pub fn chats(&self, now: SystemTime) -> Vec<ChatContext> {
         let is_active = |f: &SessionFile| {
             f.modified
-                .is_some_and(|m| now.duration_since(m).unwrap_or_default() <= ACTIVE_WINDOW)
+                .is_some_and(|m| unix_secs(now) - unix_secs(m) <= RECENT_CHAT_SECS)
         };
         let mut subagents: HashMap<&str, usize> = HashMap::new();
         for f in self.files.values().filter(|f| is_active(f)) {
