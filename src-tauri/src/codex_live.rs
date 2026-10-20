@@ -15,7 +15,6 @@ use serde::Deserialize;
 
 use crate::codex::{RateReading, RateWindow};
 
-pub const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_ID: u64 = 1;
 

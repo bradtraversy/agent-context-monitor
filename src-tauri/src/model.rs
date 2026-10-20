@@ -73,8 +73,11 @@ pub struct ProviderUsage {
     pub stale: bool,
 }
 
-/// Every provider refreshes usage every few minutes, so anything older missed updates.
-pub const USAGE_STALE_AFTER_SECS: i64 = 15 * 60;
+/// Live usage is re-checked once the newest reading is this old, which keeps every
+/// provider under the five-minute freshness limit without constant polling.
+pub const LIVE_REFRESH_AFTER_SECS: i64 = 4 * 60;
+/// No provider's usage may be older than this; older readings are shown as stale.
+pub const USAGE_STALE_AFTER_SECS: i64 = 5 * 60;
 
 impl ProviderUsage {
     pub fn unknown(provider: &'static str, name: &'static str, note: impl Into<String>) -> Self {

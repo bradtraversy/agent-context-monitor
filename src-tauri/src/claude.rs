@@ -14,7 +14,6 @@ use crate::model::{LimitWindow, ProviderUsage, UsageStatus, unix_secs};
 const PROVIDER: &str = "claude";
 const NAME: &str = "Claude";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-pub const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SIGN_IN_HINT: &str = "Sign in to Claude Code in a terminal to see Claude usage.";
 
 #[derive(Deserialize)]

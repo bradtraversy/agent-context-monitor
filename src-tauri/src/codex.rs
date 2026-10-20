@@ -173,6 +173,16 @@ impl CodexSource {
         }
     }
 
+    /// Unix seconds of the newest usage reading found in session files.
+    pub fn newest_file_reading(&self) -> Option<i64> {
+        self.files
+            .values()
+            .filter_map(|f| f.rate.as_ref())
+            .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.observed_at).ok())
+            .map(|t| t.timestamp())
+            .max()
+    }
+
     /// The newest reading wins, whether from a session file or asked of Codex live.
     pub fn usage(&self, now: SystemTime, live: Option<&RateReading>) -> ProviderUsage {
         let newest = self
