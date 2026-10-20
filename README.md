@@ -9,7 +9,7 @@ A small tray app that shows how much Claude Code and Codex usage you have left t
 
 - Claude chats: Claude Code's live session registry in `~/.claude/sessions` lists open chats with their name and busy or idle state. Context tokens come from the last reply in each transcript. Transcripts do not record the context window, so it is estimated from the model name (1M for Opus and Sonnet 5.x or any `[1m]` model, 200k for Haiku) and marked estimated. Unknown models show a token count only.
 
-Only usage and session metadata are kept.
+Only usage and session metadata are kept. For the History tab, each fresh usage reading that differs from the last one (time, session and weekly percent, weekly reset time) is appended to `usage-history.jsonl` in the app's data folder, and readings older than 120 days are dropped at startup. Daily bars show how much of the weekly limit was used that day; weekly bars show the highest weekly usage reached before each reset.
 
 No usage reading should be more than five minutes old. Older ones are greyed out and labeled as possibly out of date, and they don't color the tray. A new provider must refresh usage from a live source within that limit, using as little as it can, with local files only as a fallback, so resets show up even when the agent hasn't been used. Message content is never stored or displayed.
 

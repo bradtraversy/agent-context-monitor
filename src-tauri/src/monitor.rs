@@ -10,6 +10,7 @@ use crate::claude::ClaudeSource;
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
 use crate::codex_live;
+use crate::history::Recorder;
 use crate::model::{ChatContext, LIVE_REFRESH_AFTER_SECS, Snapshot, unix_secs};
 use crate::tray;
 
@@ -19,10 +20,19 @@ const LIVE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub struct SharedSnapshot(pub Mutex<Snapshot>);
 
+/// Where usage readings are kept so the History tab can chart them.
+pub struct HistoryFile(pub PathBuf);
+
 pub fn start(app: AppHandle) {
     let home = std::env::home_dir().unwrap_or_default();
     let claude_home = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+    let history_path = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| home.join(".agent-context-monitor"))
+        .join("usage-history.jsonl");
+    app.manage(HistoryFile(history_path.clone()));
 
     // Live usage checks are slow, so they run apart from the file loop and only when
     // the newest reading is about to go stale.
@@ -70,6 +80,7 @@ pub fn start(app: AppHandle) {
     thread::spawn(move || {
         let mut codex = CodexSource::new(codex_home);
         let mut claude_sessions = ClaudeSessions::new(claude_home);
+        let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
             let now = SystemTime::now();
             codex.refresh(now);
@@ -81,6 +92,7 @@ pub fn start(app: AppHandle) {
                 claude.lock().unwrap().usage(now).with_staleness(now),
                 codex.usage(now, live.as_ref()).with_staleness(now),
             ];
+            history.record(&usage, now);
             let mut chats = claude_sessions.chats(now);
             chats.extend(codex.chats(now));
             chats.sort_by(|a, b| {

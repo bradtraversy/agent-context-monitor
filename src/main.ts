@@ -48,6 +48,21 @@ interface Snapshot {
   level: Level;
 }
 
+interface Bar {
+  start: number;
+  used: number | null;
+  current: boolean;
+}
+
+interface ProviderHistory {
+  provider: string;
+  name: string;
+  daily: Bar[];
+  weekly: Bar[];
+}
+
+type Range = "daily" | "weekly";
+
 const WARNING = 70;
 const CRITICAL = 90;
 
@@ -56,6 +71,11 @@ const chatList = document.querySelector<HTMLElement>("#chat-list")!;
 const filterButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-provider]")];
 const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
 let providerFilter = localStorage.getItem("providerFilter") ?? "all";
+const historyList = document.querySelector<HTMLElement>("#history-list")!;
+const historyPanel = document.querySelector<HTMLElement>("#panel-history")!;
+const rangeButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-range]")];
+let range: Range = localStorage.getItem("historyRange") === "weekly" ? "weekly" : "daily";
+let history: ProviderHistory[] = [];
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
@@ -197,6 +217,96 @@ function setFilter(provider: string) {
 for (const b of filterButtons) b.addEventListener("click", () => setFilter(b.dataset.provider!));
 setFilter(providerFilter);
 
+function barLabel(b: Bar): string {
+  const date = new Date(b.start * 1000);
+  if (range === "daily") {
+    const day = date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+    return b.current ? `Today (${day})` : day;
+  }
+  const week = `Week of ${date.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+  return b.current ? `${week}, so far` : week;
+}
+
+function barValue(b: Bar): string {
+  if (b.used === null) return "no readings yet";
+  return range === "daily" ? `${b.used.toFixed(0)}% of the weekly limit used` : `${b.used.toFixed(0)}% of the limit used`;
+}
+
+function historyCard(h: ProviderHistory): string {
+  const bars = range === "daily" ? h.daily : h.weekly;
+  const known = bars.filter((b) => b.used !== null);
+  if (!known.length) {
+    return `<article class="card"><h2>${escape(h.name)}</h2>
+      <p class="note">No readings yet. Bars fill in as the app checks your usage.</p></article>`;
+  }
+  // Weekly bars read against the full limit; daily ones scale up so small days stay visible.
+  const max = range === "weekly" ? 100 : Math.max(10, ...known.map((b) => b.used!));
+  const cols = bars
+    .map((b, i) => {
+      const height = b.used === null ? 0 : Math.max(b.used > 0 ? 2 : 0, (b.used / max) * 100);
+      const level = range === "weekly" && b.used !== null ? levelFor(b.used) : "accent";
+      const date = new Date(b.start * 1000);
+      const tick =
+        range === "daily"
+          ? date.toLocaleDateString([], { weekday: "narrow" })
+          : date.toLocaleDateString([], { month: "numeric", day: "numeric" });
+      const text = `${barLabel(b)}: ${barValue(b)}`;
+      return `<button class="col" data-index="${i}" data-empty="${b.used === null}" data-current="${b.current}"
+          aria-label="${escape(text)}" title="${escape(text)}">
+        <span class="col-track"><span class="col-fill" data-level="${level}" style="height:${height}%"></span></span>
+        <span class="tick">${tick}</span>
+      </button>`;
+    })
+    .join("");
+  const latest = known[known.length - 1];
+  const summary = `${barLabel(latest)}: ${barValue(latest)}`;
+  return `<article class="card history" data-provider="${escape(h.provider)}">
+    <h2>${escape(h.name)}</h2>
+    <div class="chart" style="--cols:${bars.length}">${cols}</div>
+    <div class="sub readout" data-default="${escape(summary)}">${escape(summary)}</div>
+  </article>`;
+}
+
+function renderHistory() {
+  const intro =
+    range === "daily"
+      ? "How much of each weekly limit you used per day."
+      : "The most of each weekly limit you used before it reset.";
+  historyList.innerHTML =
+    `<p class="sub intro">${intro}</p>` +
+    (history.map(historyCard).join("") || `<p class="empty">Usage history appears once usage is checked.</p>`);
+}
+
+async function loadHistory() {
+  if (historyPanel.hidden) return;
+  history = await invoke<ProviderHistory[]>("get_history", { utcOffsetMinutes: -new Date().getTimezoneOffset() });
+  renderHistory();
+}
+
+function setRange(next: Range) {
+  range = next;
+  localStorage.setItem("historyRange", next);
+  for (const b of rangeButtons) b.setAttribute("aria-checked", String(b.dataset.range === next));
+  renderHistory();
+}
+
+for (const b of rangeButtons) b.addEventListener("click", () => setRange(b.dataset.range as Range));
+setRange(range);
+
+function showReadout(target: EventTarget | null) {
+  const col = (target as HTMLElement | null)?.closest<HTMLElement>(".col");
+  const card = (target as HTMLElement | null)?.closest<HTMLElement>(".history");
+  const readout = card?.querySelector<HTMLElement>(".readout");
+  if (!readout) return;
+  readout.textContent = col ? col.getAttribute("aria-label") : readout.dataset.default!;
+}
+
+historyList.addEventListener("pointerover", (e) => showReadout(e.target));
+historyList.addEventListener("focusin", (e) => showReadout(e.target));
+historyList.addEventListener("pointerleave", () => {
+  for (const r of historyList.querySelectorAll<HTMLElement>(".readout")) r.textContent = r.dataset.default!;
+});
+
 function selectTab(tab: HTMLButtonElement) {
   for (const t of tabs) {
     const selected = t === tab;
@@ -204,6 +314,7 @@ function selectTab(tab: HTMLButtonElement) {
     t.tabIndex = selected ? 0 : -1;
     document.getElementById(t.getAttribute("aria-controls")!)!.hidden = !selected;
   }
+  loadHistory();
 }
 
 for (const tab of tabs) {
@@ -226,3 +337,5 @@ invoke<Snapshot>("get_snapshot").then((s) => {
 });
 // Relative times drift between snapshots, so redraw on a timer too.
 setInterval(render, 30_000);
+// New readings arrive every few minutes at most, so a slow refresh keeps the chart current.
+setInterval(loadHistory, 60_000);
