@@ -1,6 +1,7 @@
 mod claude;
 mod claude_sessions;
 mod codex;
+mod codex_live;
 mod jsonl;
 mod model;
 mod monitor;

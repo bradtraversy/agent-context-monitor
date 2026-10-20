@@ -4,8 +4,8 @@ A small tray app that shows how much Claude Code and Codex usage you have left t
 
 ## What it reads
 
-- Codex: `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Usage limits come from the newest `token_count` record. Windows are identified by length, so a plan with only a weekly limit shows "Not reported" for the session limit. Chat titles come from `session_index.jsonl`.
-- Claude: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), used for one read-only usage request to Anthropic every five minutes. This is the app's only network call. The token is never logged or stored. If the login is missing or expired, Claude usage shows as unknown.
+- Codex: every five minutes the app asks the installed Codex for live usage (`codex app-server`, read-only `account/rateLimits/read`), the same source as its /status screen. Codex uses its own login. The newest `token_count` record in `~/.codex/sessions` (or `$CODEX_HOME/sessions`) is used too, and whichever reading is newer wins. Windows are identified by length, so a plan with only a weekly limit shows "Not reported" for the session limit. Chat titles come from `session_index.jsonl`.
+- Claude: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), used for one read-only usage request to Anthropic every five minutes. Apart from Codex's own usage check, this is the app's only network call. The token is never logged or stored. If the login is missing or expired, Claude usage shows as unknown.
 
 - Claude chats: Claude Code's live session registry in `~/.claude/sessions` lists open chats with their name and busy or idle state. Context tokens come from the last reply in each transcript. Transcripts do not record the context window, so it is estimated from the model name (1M for Opus and Sonnet 5.x or any `[1m]` model, 200k for Haiku) and marked estimated. Unknown models show a token count only.
 

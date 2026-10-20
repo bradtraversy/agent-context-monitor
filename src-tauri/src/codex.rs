@@ -25,17 +25,17 @@ pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30 * 60);
 const SESSION_WINDOW_MAX_MINUTES: u64 = 24 * 60;
 
 #[derive(Debug, Clone, PartialEq)]
-struct RateReading {
-    observed_at: String,
-    plan: Option<String>,
-    windows: Vec<RateWindow>,
+pub(crate) struct RateReading {
+    pub observed_at: String,
+    pub plan: Option<String>,
+    pub windows: Vec<RateWindow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct RateWindow {
-    used_percent: f64,
-    window_minutes: Option<u64>,
-    resets_at: Option<i64>,
+pub(crate) struct RateWindow {
+    pub used_percent: f64,
+    pub window_minutes: Option<u64>,
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -173,11 +173,13 @@ impl CodexSource {
         }
     }
 
-    pub fn usage(&self, now: SystemTime) -> ProviderUsage {
+    /// The newest reading wins, whether from a session file or asked of Codex live.
+    pub fn usage(&self, now: SystemTime, live: Option<&RateReading>) -> ProviderUsage {
         let newest = self
             .files
             .values()
             .filter_map(|f| f.rate.as_ref())
+            .chain(live)
             .max_by(|a, b| a.observed_at.cmp(&b.observed_at));
         match newest {
             None => ProviderUsage::unknown(
@@ -335,6 +337,7 @@ fn parent_thread_id(source: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     const SENTINEL: &str = "SENTINEL-PRIVATE-PROMPT-7731";
 
@@ -438,5 +441,33 @@ mod tests {
         assert_eq!(f.parent_id.as_deref(), Some("root"));
         let root = file_from(&[meta("root", "")]);
         assert!(!format!("{root:?}{f:?}").contains(SENTINEL));
+    }
+
+    #[test]
+    fn newer_live_reading_beats_an_older_file_reading() {
+        let limits =
+            r#"{"primary":{"used_percent":14.0,"window_minutes":10080,"resets_at":2000000000}}"#;
+        let mut source = CodexSource::new(PathBuf::from("/nonexistent"));
+        source.files.insert(
+            PathBuf::from("a.jsonl"),
+            file_from(&[token("2026-10-19T13:03:28.563Z", 10, 8, 2, limits)]),
+        );
+        let live = RateReading {
+            observed_at: "2026-10-20T10:30:00.000Z".into(),
+            plan: Some("pro".into()),
+            windows: vec![RateWindow {
+                used_percent: 0.0,
+                window_minutes: Some(10080),
+                resets_at: Some(2_000_100_000),
+            }],
+        };
+        let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let weekly = |usage: ProviderUsage| usage.weekly;
+        assert!(
+            matches!(weekly(source.usage(now, Some(&live))), LimitWindow::Reported { used_percent, .. } if used_percent == 0.0)
+        );
+        assert!(
+            matches!(weekly(source.usage(now, None)), LimitWindow::Reported { used_percent, .. } if used_percent == 14.0)
+        );
     }
 }
