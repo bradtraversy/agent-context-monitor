@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the older run to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            bin: agent-context-monitor
+          - name: macOS
+            os: macos-latest
+            bin: agent-context-monitor
+          - name: Windows
+            os: windows-latest
+            bin: agent-context-monitor.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            xvfb imagemagick
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Debug build with the frontend embedded, no installers, to keep the run short.
+      - name: Build
+        run: npx tauri build --debug --no-bundle
+
+      - name: Launch smoke check
+        env:
+          BIN: src-tauri/target/debug/${{ matrix.bin }}
+          SHOT: screenshot-${{ matrix.name }}.png
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              Xvfb :99 -screen 0 1280x800x24 &
+              export DISPLAY=:99
+              sleep 2
+              ;;
+          esac
+
+          "$BIN" &
+          pid=$!
+          sleep 15
+
+          case "$RUNNER_OS" in
+            Linux) import -window root "$SHOT" ;;
+            macOS) screencapture -x "$SHOT" ;;
+            Windows)
+              powershell -NoProfile -Command '
+                Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+                $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+                $img = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+                [System.Drawing.Graphics]::FromImage($img).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+                $img.Save($env:SHOT)'
+              ;;
+          esac
+
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::App exited during launch"
+            wait "$pid" || true
+            exit 1
+          fi
+          echo "App still running after 15s"
+          kill "$pid" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-${{ matrix.name }}
+          path: screenshot-${{ matrix.name }}.png
+          retention-days: 7
+          if-no-files-found: ignore
