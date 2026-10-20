@@ -5,6 +5,9 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
+
+use crate::alerts::Alerts;
 
 use crate::claude::ClaudeSource;
 use crate::claude_sessions::ClaudeSessions;
@@ -79,6 +82,7 @@ pub fn start(app: AppHandle) {
     }
 
     thread::spawn(move || {
+        let mut alerts = Alerts::default();
         let mut codex = CodexSource::new(codex_home);
         let mut claude_sessions = ClaudeSessions::new(claude_home);
         let mut history = Recorder::open(history_path, SystemTime::now());
@@ -103,6 +107,14 @@ pub fn start(app: AppHandle) {
             chats.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
             let mut snapshot = Snapshot::new(usage, chats, now);
             snapshot.context_limit = limit;
+            for alert in alerts.check(&snapshot, now) {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title(alert.title)
+                    .body(alert.body)
+                    .show();
+            }
             publish(&app, snapshot);
             thread::sleep(REFRESH_INTERVAL);
         }

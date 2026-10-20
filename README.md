@@ -17,7 +17,17 @@ No usage reading should be more than five minutes old. Older ones are greyed out
 
 ## Tray
 
-The tray dot is grey with no data, green when fine, amber at 70% used, and red at 90% used, across all limits and chats. Closing the window keeps the app in the tray. On Linux, open the window or quit from the tray menu. GNOME needs the AppIndicator extension, which Ubuntu ships by default.
+The tray dot is grey with no data, green when fine, amber at 70% used, and red at 90% used, across all limits and chats. A desktop alert pops up once when a chat used in the last 30 minutes reaches 90% of its context (or your limit), and once per window when session or weekly usage passes 90%. Closing the window keeps the app in the tray. On Linux, open the window or quit from the tray menu. GNOME needs the AppIndicator extension, which Ubuntu ships by default.
+
+## Roadmap
+
+1. Desktop alerts when a chat nears its context limit or usage is nearly gone
+2. A "runs out at" estimate for session and weekly usage
+3. A usage history chart
+4. Usage broken down by project
+5. Click a chat to open its folder or copy its resume command
+6. More providers, such as Gemini CLI, Cursor, and Copilot
+7. A keyboard shortcut to open the window
 
 ## Develop
 

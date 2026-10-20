@@ -1,3 +1,4 @@
+mod alerts;
 mod claude;
 mod claude_sessions;
 mod codex;
@@ -57,6 +58,7 @@ fn get_history(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(SharedSnapshot::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
