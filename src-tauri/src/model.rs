@@ -132,9 +132,23 @@ pub struct ContextMeasure {
     pub used_percent: Option<f64>,
     pub confidence: Confidence,
     pub observed_at: String,
+    /// Measured against the user's own context limit instead of the model's window.
+    pub limited: bool,
 }
 
 impl ContextMeasure {
+    /// Measures against `limit` when it is set and smaller than the model's window.
+    pub fn with_limit(mut self, limit: Option<u64>) -> Self {
+        if let Some(limit) = limit.filter(|&l| l > 0)
+            && self.context_window.is_none_or(|w| limit < w)
+        {
+            self.context_window = Some(limit);
+            self.used_percent = Some((self.used_tokens as f64 / limit as f64 * 100.0).min(100.0));
+            self.limited = true;
+        }
+        self
+    }
+
     pub fn level(&self) -> Level {
         self.used_percent
             .map(Level::from_used_percent)
@@ -171,6 +185,8 @@ pub struct Snapshot {
     pub usage: Vec<ProviderUsage>,
     pub chats: Vec<ChatContext>,
     pub level: Level,
+    /// The user's context limit in tokens, if set.
+    pub context_limit: Option<u64>,
 }
 
 impl Snapshot {
@@ -190,6 +206,7 @@ impl Snapshot {
             usage,
             chats,
             level,
+            context_limit: None,
         }
     }
 
@@ -249,6 +266,29 @@ mod tests {
     }
 
     #[test]
+    fn context_limit_replaces_a_larger_window() {
+        let measure = |window| ContextMeasure {
+            used_tokens: 150_000,
+            context_window: window,
+            used_percent: window.map(|w| 150_000.0 / w as f64 * 100.0),
+            confidence: Confidence::Estimated,
+            observed_at: String::new(),
+            limited: false,
+        };
+        let limited = measure(Some(1_000_000)).with_limit(Some(300_000));
+        assert_eq!(limited.context_window, Some(300_000));
+        assert_eq!(limited.used_percent, Some(50.0));
+        assert!(limited.limited);
+        let unknown = measure(None).with_limit(Some(300_000));
+        assert_eq!(unknown.used_percent, Some(50.0));
+        let small = measure(Some(200_000)).with_limit(Some(300_000));
+        assert_eq!(small.context_window, Some(200_000));
+        assert!(!small.limited);
+        let none = measure(Some(1_000_000)).with_limit(None);
+        assert_eq!(none.used_percent, Some(15.0));
+    }
+
+    #[test]
     fn only_recent_chats_color_the_tray() {
         let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
         let chat = |age: i64| ChatContext {
@@ -264,6 +304,7 @@ mod tests {
                 used_percent: Some(95.0),
                 confidence: Confidence::Confirmed,
                 observed_at: String::new(),
+                limited: false,
             }),
             last_activity: unix_secs(now) - age,
             subagents: 0,

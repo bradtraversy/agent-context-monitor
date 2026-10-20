@@ -284,6 +284,7 @@ impl SessionFile {
                 used_percent: Some((usage.total_tokens as f64 / window as f64 * 100.0).min(100.0)),
                 confidence,
                 observed_at: observed_at.clone(),
+                limited: false,
             });
         }
         if let Some(limits) = payload.rate_limits {

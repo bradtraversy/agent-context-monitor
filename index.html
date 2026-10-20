@@ -25,6 +25,20 @@
           <button role="radio" data-provider="claude" aria-checked="false">Claude</button>
           <button role="radio" data-provider="codex" aria-checked="false">Codex</button>
         </div>
+        <label class="limit-picker">
+          Context limit
+          <select id="context-limit">
+            <option value="">Model max</option>
+            <option value="100000">100K</option>
+            <option value="150000">150K</option>
+            <option value="200000">200K</option>
+            <option value="250000">250K</option>
+            <option value="300000">300K</option>
+            <option value="400000">400K</option>
+            <option value="500000">500K</option>
+            <option value="750000">750K</option>
+          </select>
+        </label>
         <div id="chat-list"></div>
       </section>
     </main>

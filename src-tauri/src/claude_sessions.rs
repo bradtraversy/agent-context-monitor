@@ -311,6 +311,7 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
         // Window derived from the model name, not reported by Claude itself.
         confidence: Confidence::Estimated,
         observed_at,
+        limited: false,
     }
 }
 

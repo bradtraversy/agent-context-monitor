@@ -26,6 +26,7 @@ interface ContextMeasure {
   used_percent: number | null;
   confidence: "confirmed" | "estimated";
   observed_at: string;
+  limited: boolean;
 }
 
 interface ChatContext {
@@ -46,6 +47,7 @@ interface Snapshot {
   usage: ProviderUsage[];
   chats: ChatContext[];
   level: Level;
+  context_limit: number | null;
 }
 
 const WARNING = 70;
@@ -53,6 +55,7 @@ const CRITICAL = 90;
 
 const usagePanel = document.querySelector<HTMLElement>("#panel-usage")!;
 const chatList = document.querySelector<HTMLElement>("#chat-list")!;
+const limitPicker = document.querySelector<HTMLSelectElement>("#context-limit")!;
 const filterButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-provider]")];
 const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
 let providerFilter = localStorage.getItem("providerFilter") ?? "all";
@@ -160,7 +163,7 @@ function chatRow(c: ChatContext): string {
     const level = levelFor(m.used_percent);
     const left = Math.max(0, 100 - m.used_percent);
     const warn = LEVEL_TEXT[level] ? ` <strong class="tag">${LEVEL_TEXT[level]}</strong>` : "";
-    const estimated = m.confidence === "estimated" ? " (estimated)" : "";
+    const estimated = m.limited ? " (your limit)" : m.confidence === "estimated" ? " (estimated)" : "";
     gauge = `<div class="limit-head"><span>Context</span>
         <span><b>${left.toFixed(0)}% left</b>${warn}</span></div>
       ${bar(m.used_percent, level)}
@@ -181,6 +184,7 @@ function chatRow(c: ChatContext): string {
 function render() {
   if (!snapshot) return;
   usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
+  if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
   const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
   chatList.innerHTML =
@@ -195,6 +199,10 @@ function setFilter(provider: string) {
 }
 
 for (const b of filterButtons) b.addEventListener("click", () => setFilter(b.dataset.provider!));
+limitPicker.addEventListener("change", () => {
+  const tokens = limitPicker.value ? Number(limitPicker.value) : null;
+  invoke("set_context_limit", { tokens });
+});
 setFilter(providerFilter);
 
 function selectTab(tab: HTMLButtonElement) {

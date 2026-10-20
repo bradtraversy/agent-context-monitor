@@ -275,3 +275,25 @@ h3 {
   text-align: center;
   margin: 16px 0;
 }
+
+.limit-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.limit-picker select {
+  font: inherit;
+  color: var(--text);
+  background: var(--track);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+.limit-picker select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

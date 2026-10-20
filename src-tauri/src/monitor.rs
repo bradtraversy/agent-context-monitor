@@ -11,6 +11,7 @@ use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
 use crate::codex_live;
 use crate::model::{LIVE_REFRESH_AFTER_SECS, Snapshot, unix_secs};
+use crate::settings::Settings;
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -81,10 +82,16 @@ pub fn start(app: AppHandle) {
                 claude.lock().unwrap().usage(now).with_staleness(now),
                 codex.usage(now, live.as_ref()).with_staleness(now),
             ];
+            let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
             chats.extend(codex.chats(now));
+            for chat in &mut chats {
+                chat.context = chat.context.take().map(|c| c.with_limit(limit));
+            }
             chats.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
-            publish(&app, Snapshot::new(usage, chats, now));
+            let mut snapshot = Snapshot::new(usage, chats, now);
+            snapshot.context_limit = limit;
+            publish(&app, snapshot);
             thread::sleep(REFRESH_INTERVAL);
         }
     });

@@ -9,7 +9,7 @@ A small tray app that shows how much Claude Code and Codex usage you have left t
 
 - Claude chats: Claude Code's live session registry in `~/.claude/sessions` lists open chats with their name and busy or idle state. Closed chats come from transcripts in `~/.claude/projects` written in the last 24 hours, titled from the name Claude saved. Context tokens come from the last reply in each transcript. Transcripts do not record the context window, so it is estimated from the model name (1M for Opus and Sonnet 5.x or any `[1m]` model, 200k for Haiku) and marked estimated. Unknown models show a token count only.
 
-The Context tab shows Claude and Codex chats used in the last 24 hours, most recent first. A chat drops off after a quiet day and comes back as soon as it is used again. Only chats used in the last 30 minutes color the tray.
+The Context tab shows Claude and Codex chats used in the last 24 hours, most recent first. A chat drops off after a quiet day and comes back as soon as it is used again. Only chats used in the last 30 minutes color the tray. The Context limit picker measures every chat against your own limit, such as 300K, instead of the model's window when it is smaller. It is saved in the app's config folder.
 
 Only usage and session metadata are kept.
 
