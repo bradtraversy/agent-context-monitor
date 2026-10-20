@@ -174,6 +174,7 @@ impl ClaudeSource {
             observed_at: Some(reading.fetched_at.clone()),
             session,
             weekly,
+            stale: false,
         }
     }
 }

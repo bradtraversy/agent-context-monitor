@@ -69,7 +69,12 @@ pub struct ProviderUsage {
     pub observed_at: Option<String>,
     pub session: LimitWindow,
     pub weekly: LimitWindow,
+    /// The reading is too old to trust as the current value.
+    pub stale: bool,
 }
+
+/// Every provider refreshes usage every few minutes, so anything older missed updates.
+pub const USAGE_STALE_AFTER_SECS: i64 = 15 * 60;
 
 impl ProviderUsage {
     pub fn unknown(provider: &'static str, name: &'static str, note: impl Into<String>) -> Self {
@@ -82,10 +87,24 @@ impl ProviderUsage {
             observed_at: None,
             session: LimitWindow::NotReported,
             weekly: LimitWindow::NotReported,
+            stale: false,
         }
     }
 
+    pub fn with_staleness(mut self, now: SystemTime) -> Self {
+        let observed = self
+            .observed_at
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.timestamp());
+        self.stale = observed.is_some_and(|t| unix_secs(now) - t > USAGE_STALE_AFTER_SECS);
+        self
+    }
+
     pub fn level(&self) -> Level {
+        if self.stale {
+            return Level::Unknown;
+        }
         self.session.level().max(self.weekly.level())
     }
 }
@@ -179,6 +198,7 @@ impl Snapshot {
                 .into_iter()
                 .flatten()
                 .collect();
+            let parts = if u.stale { Vec::new() } else { parts };
             let summary = if parts.is_empty() {
                 "unknown".to_string()
             } else {
@@ -194,4 +214,28 @@ pub fn unix_secs(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn old_readings_are_stale_and_do_not_color_the_tray() {
+        let mut usage = ProviderUsage::unknown("x", "X", "");
+        usage.observed_at = Some("2026-10-19T13:03:28.563Z".into());
+        usage.weekly = LimitWindow::Reported {
+            used_percent: 95.0,
+            resets_at: None,
+        };
+        let observed = 1_792_415_008; // 2026-10-19T13:03:28Z
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+        let fresh = usage.clone().with_staleness(at(observed + 60));
+        assert!(!fresh.stale);
+        assert_eq!(fresh.level(), Level::Critical);
+        let old = usage.with_staleness(at(observed + 21 * 60 * 60));
+        assert!(old.stale);
+        assert_eq!(old.level(), Level::Unknown);
+    }
 }

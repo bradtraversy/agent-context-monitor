@@ -324,6 +324,7 @@ fn usage_from_reading(reading: &RateReading, now: i64) -> ProviderUsage {
         observed_at: Some(reading.observed_at.clone()),
         session,
         weekly,
+        stale: false,
     }
 }
 

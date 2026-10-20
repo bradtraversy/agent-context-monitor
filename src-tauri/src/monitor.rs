@@ -57,8 +57,8 @@ pub fn start(app: AppHandle) {
             codex.refresh(now);
             let live = codex_live.lock().unwrap().clone();
             let usage = vec![
-                claude.lock().unwrap().usage(now),
-                codex.usage(now, live.as_ref()),
+                claude.lock().unwrap().usage(now).with_staleness(now),
+                codex.usage(now, live.as_ref()).with_staleness(now),
             ];
             let mut chats = claude_sessions.chats(now);
             chats.extend(codex.chats(now));

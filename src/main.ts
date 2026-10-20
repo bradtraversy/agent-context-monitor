@@ -17,6 +17,7 @@ interface ProviderUsage {
   observed_at: string | null;
   session: LimitWindow;
   weekly: LimitWindow;
+  stale: boolean;
 }
 
 interface ContextMeasure {
@@ -125,13 +126,18 @@ function limitRow(label: string, window: LimitWindow): string {
 
 function usageCard(u: ProviderUsage): string {
   const plan = u.plan ? `<span class="pill">${escape(u.plan)}</span>` : "";
-  const observed = u.observed_at ? `Updated ${ago(Date.parse(u.observed_at) / 1000)}` : "";
+  const age = u.observed_at ? ago(Date.parse(u.observed_at) / 1000) : "";
+  const observed = u.stale
+    ? `<strong class="tag">Last reading ${age}, may be out of date</strong>`
+    : age
+      ? `Updated ${age}`
+      : "";
   const body =
     u.status === "available"
       ? limitRow("Current session", u.session) + limitRow("This week", u.weekly)
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
-  return `<article class="card">
+  return `<article class="card" data-stale="${u.stale}">
     <h2>${escape(u.name)} ${plan}</h2>
     ${body}${note}
     <div class="meta">${observed}</div>
