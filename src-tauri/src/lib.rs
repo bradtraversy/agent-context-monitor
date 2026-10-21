@@ -2,16 +2,20 @@ mod claude;
 mod claude_sessions;
 mod codex;
 mod codex_live;
+mod history;
 mod jsonl;
 mod model;
 mod monitor;
 mod settings;
 mod tray;
 
+use std::time::SystemTime;
+
 use tauri::{Manager, WindowEvent};
 
+use crate::history::ProviderHistory;
 use crate::model::Snapshot;
-use crate::monitor::SharedSnapshot;
+use crate::monitor::{HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
 
 #[tauri::command]
@@ -24,11 +28,41 @@ fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
 }
 
+#[tauri::command]
+fn get_history(
+    snapshot: tauri::State<SharedSnapshot>,
+    file: tauri::State<HistoryFile>,
+    utc_offset_minutes: i64,
+    days: usize,
+    weeks: usize,
+) -> Vec<ProviderHistory> {
+    let providers: Vec<(String, String)> = snapshot
+        .0
+        .lock()
+        .unwrap()
+        .usage
+        .iter()
+        .map(|u| (u.provider.to_string(), u.name.to_string()))
+        .collect();
+    history::load(
+        &file.0,
+        &providers,
+        SystemTime::now(),
+        utc_offset_minutes * 60,
+        days,
+        weeks,
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(SharedSnapshot::default())
-        .invoke_handler(tauri::generate_handler![get_snapshot, set_context_limit])
+        .invoke_handler(tauri::generate_handler![
+            get_snapshot,
+            get_history,
+            set_context_limit
+        ])
         .setup(|app| {
             let path = app
                 .path()

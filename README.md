@@ -11,7 +11,7 @@ A small tray app that shows how much Claude Code and Codex usage you have left t
 
 The Context tab shows Claude and Codex chats used in the last 24 hours, most recent first. A chat drops off after a quiet day and comes back as soon as it is used again. Only chats used in the last 30 minutes color the tray. The Context limit picker measures every chat against your own limit, such as 300K, instead of the model's window when it is smaller. It is saved in the app's config folder.
 
-Only usage and session metadata are kept.
+Only usage and session metadata are kept. For the History tab, each fresh usage reading that differs from the last one (time, session and weekly percent, weekly reset time) is appended to `usage-history.jsonl` in the app's data folder, and readings older than 120 days are dropped at startup. Daily bars show how much of the weekly limit was used that day; weekly bars show the highest weekly usage reached before each reset.
 
 No usage reading should be more than five minutes old. Older ones are greyed out and labeled as possibly out of date, and they don't color the tray. A new provider must refresh usage from a live source within that limit, using as little as it can, with local files only as a fallback, so resets show up even when the agent hasn't been used. Message content is never stored or displayed.
 
