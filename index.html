@@ -15,17 +15,27 @@
         <button role="tab" id="tab-context" aria-controls="panel-context" aria-selected="false" tabindex="-1">
           Context
         </button>
+        <button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1">
+          History
+        </button>
       </nav>
     </header>
     <main>
-      <section role="tabpanel" id="panel-usage" aria-labelledby="tab-usage"></section>
-      <section role="tabpanel" id="panel-context" aria-labelledby="tab-context" hidden>
+      <section role="tabpanel" id="panel-usage" data-title="Usage" aria-labelledby="tab-usage"></section>
+      <section role="tabpanel" id="panel-context" data-title="Context" aria-labelledby="tab-context" hidden>
         <div class="filter" role="radiogroup" aria-label="Show chats from">
           <button role="radio" data-provider="all" aria-checked="true">All</button>
           <button role="radio" data-provider="claude" aria-checked="false">Claude</button>
           <button role="radio" data-provider="codex" aria-checked="false">Codex</button>
         </div>
         <div id="chat-list"></div>
+      </section>
+      <section role="tabpanel" id="panel-history" data-title="History" aria-labelledby="tab-history" hidden>
+        <div class="filter" role="radiogroup" aria-label="Group usage by">
+          <button role="radio" data-range="daily" aria-checked="true">Daily</button>
+          <button role="radio" data-range="weekly" aria-checked="false">Weekly</button>
+        </div>
+        <div id="history-list"></div>
       </section>
     </main>
   </body>

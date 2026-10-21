@@ -53,7 +53,7 @@ header {
 
 nav {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   padding: 3px;
   border-radius: 8px;
@@ -274,4 +274,141 @@ h3 {
 .footnote {
   text-align: center;
   margin: 16px 0;
+}
+
+.intro {
+  margin: 0 0 10px;
+}
+
+.chart {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), 1fr);
+  gap: 2px;
+  height: 96px;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: default;
+}
+
+.col:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+.col-track {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border);
+}
+
+.col-fill {
+  width: 100%;
+  max-width: 18px;
+  margin: 0 auto;
+  border-radius: 4px 4px 0 0;
+  background: var(--accent);
+}
+
+.col:hover .col-fill,
+.col:focus-visible .col-fill {
+  filter: brightness(1.2);
+}
+
+.col-fill[data-level="ok"] {
+  background: var(--ok);
+}
+
+.col-fill[data-level="warning"] {
+  background: var(--warning);
+}
+
+.col-fill[data-level="critical"] {
+  background: var(--critical);
+}
+
+.col[data-empty="true"] .col-track {
+  border-bottom-style: dashed;
+}
+
+.tick {
+  height: 14px;
+  line-height: 14px;
+  font-size: 10px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.col[data-current="true"] .tick {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.readout {
+  min-height: 1.4em;
+  margin-top: 8px;
+}
+
+/* Wide windows drop the tabs and show every panel, with history across the bottom. */
+@media (min-width: 760px) {
+  header {
+    display: none;
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 16px;
+    align-items: start;
+    padding-top: 12px;
+  }
+
+  [role="tabpanel"][hidden] {
+    display: block;
+  }
+
+  [role="tabpanel"]::before {
+    content: attr(data-title);
+    display: block;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  #panel-history {
+    grid-column: 1 / -1;
+  }
+
+  #history-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 16px;
+  }
+
+  #history-list > :not(.card) {
+    grid-column: 1 / -1;
+  }
+
+  .chart {
+    height: 140px;
+  }
+
+  .tick {
+    overflow: visible;
+  }
 }
