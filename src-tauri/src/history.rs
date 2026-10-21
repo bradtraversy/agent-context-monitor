@@ -10,8 +10,6 @@ use crate::model::{LimitWindow, ProviderUsage, UsageStatus, unix_secs};
 
 const KEEP_SECS: i64 = 120 * DAY;
 const DAY: i64 = 24 * 60 * 60;
-const DAYS_SHOWN: i64 = 14;
-const WEEKS_SHOWN: usize = 8;
 /// Providers report reset times with a little jitter between readings.
 const RESET_JITTER_SECS: i64 = 60 * 60;
 /// A smaller drop in weekly usage is rounding, not a reset.
@@ -157,7 +155,12 @@ pub fn load(
     providers: &[(String, String)],
     now: SystemTime,
     utc_offset_secs: i64,
+    days: usize,
+    weeks: usize,
 ) -> Vec<ProviderHistory> {
+    // Nothing older than the retention window is kept, so asking for more shows nothing new.
+    let days = days.clamp(1, (KEEP_SECS / DAY) as usize);
+    let weeks = weeks.clamp(1, days.div_ceil(7) + 1);
     let samples = read_samples(path);
     providers
         .iter()
@@ -166,15 +169,15 @@ pub fn load(
             ProviderHistory {
                 provider: provider.clone(),
                 name: name.clone(),
-                daily: daily(&mine, unix_secs(now), utc_offset_secs),
-                weekly: weekly(&mine, unix_secs(now)),
+                daily: daily(&mine, unix_secs(now), utc_offset_secs, days),
+                weekly: weekly(&mine, unix_secs(now), weeks),
             }
         })
         .collect()
 }
 
 /// Share of the weekly limit used on each local day, from the rise between readings.
-fn daily(samples: &[&Sample], now: i64, offset: i64) -> Vec<Bar> {
+fn daily(samples: &[&Sample], now: i64, offset: i64, days: usize) -> Vec<Bar> {
     let day_of = |t: i64| (t + offset).div_euclid(DAY);
     let today = day_of(now);
     let first_day = samples.first().map(|s| day_of(s.t));
@@ -189,7 +192,7 @@ fn daily(samples: &[&Sample], now: i64, offset: i64) -> Vec<Bar> {
         };
         *used.entry(day_of(cur.t)).or_default() += rise;
     }
-    (today - DAYS_SHOWN + 1..=today)
+    (today - days as i64 + 1..=today)
         .map(|day| Bar {
             start: day * DAY - offset,
             used: first_day
@@ -201,7 +204,7 @@ fn daily(samples: &[&Sample], now: i64, offset: i64) -> Vec<Bar> {
 }
 
 /// Highest weekly usage reached in each weekly window, keyed by its reset time.
-fn weekly(samples: &[&Sample], now: i64) -> Vec<Bar> {
+fn weekly(samples: &[&Sample], now: i64, shown: usize) -> Vec<Bar> {
     let mut weeks: Vec<(i64, f64)> = Vec::new();
     for s in samples {
         let Some(reset) = s.r else { continue };
@@ -210,7 +213,7 @@ fn weekly(samples: &[&Sample], now: i64) -> Vec<Bar> {
             _ => weeks.push((reset, s.w)),
         }
     }
-    let skip = weeks.len().saturating_sub(WEEKS_SHOWN);
+    let skip = weeks.len().saturating_sub(shown);
     weeks
         .into_iter()
         .skip(skip)
@@ -284,8 +287,8 @@ mod tests {
             sample(NOW + 30, 4.0, next_reset),
         ];
         let refs: Vec<&Sample> = samples.iter().collect();
-        let bars = daily(&refs, NOW + 60, 0);
-        assert_eq!(bars.len(), DAYS_SHOWN as usize);
+        let bars = daily(&refs, NOW + 60, 0, 14);
+        assert_eq!(bars.len(), 14);
         let used: Vec<Option<f64>> = bars.iter().rev().take(4).map(|b| b.used).collect();
         assert_eq!(used, vec![Some(4.0), Some(6.5), Some(5.0), None]);
         assert!(bars.last().unwrap().current);
@@ -300,10 +303,10 @@ mod tests {
             sample(NOW - 3600, 15.0, reset),
         ];
         let refs: Vec<&Sample> = samples.iter().collect();
-        let utc = daily(&refs, NOW + 3600, 0);
-        let new_york = daily(&refs, NOW + 3600, -4 * 3600);
-        assert_eq!(utc[DAYS_SHOWN as usize - 2].used, Some(5.0));
-        assert_eq!(new_york[DAYS_SHOWN as usize - 1].used, Some(5.0));
+        let utc = daily(&refs, NOW + 3600, 0, 14);
+        let new_york = daily(&refs, NOW + 3600, -4 * 3600, 14);
+        assert_eq!(utc[12].used, Some(5.0));
+        assert_eq!(new_york[13].used, Some(5.0));
     }
 
     #[test]
@@ -317,7 +320,7 @@ mod tests {
             sample(NOW - 60, 40.0, second),
         ];
         let refs: Vec<&Sample> = samples.iter().collect();
-        let bars = weekly(&refs, NOW);
+        let bars = weekly(&refs, NOW, 8);
         let peaks: Vec<(Option<f64>, bool)> = bars.iter().map(|b| (b.used, b.current)).collect();
         assert_eq!(peaks, vec![(Some(82.0), false), (Some(40.0), true)]);
     }

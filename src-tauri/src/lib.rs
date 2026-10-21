@@ -26,6 +26,8 @@ fn get_history(
     snapshot: tauri::State<SharedSnapshot>,
     file: tauri::State<HistoryFile>,
     utc_offset_minutes: i64,
+    days: usize,
+    weeks: usize,
 ) -> Vec<ProviderHistory> {
     let providers: Vec<(String, String)> = snapshot
         .0
@@ -40,6 +42,8 @@ fn get_history(
         &providers,
         SystemTime::now(),
         utc_offset_minutes * 60,
+        days,
+        weeks,
     )
 }
 

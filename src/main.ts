@@ -76,6 +76,8 @@ const historyPanel = document.querySelector<HTMLElement>("#panel-history")!;
 const rangeButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-range]")];
 let range: Range = localStorage.getItem("historyRange") === "weekly" ? "weekly" : "daily";
 let history: ProviderHistory[] = [];
+// Widening the window shows every panel at once, with longer history.
+const wide = matchMedia("(min-width: 760px)");
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
@@ -246,10 +248,15 @@ function historyCard(h: ProviderHistory): string {
       const height = b.used === null ? 0 : Math.max(b.used > 0 ? 2 : 0, (b.used / max) * 100);
       const level = range === "weekly" && b.used !== null ? levelFor(b.used) : "accent";
       const date = new Date(b.start * 1000);
+      // A month of daily bars is too tight to label each one, so label every seventh back from today.
       const tick =
-        range === "daily"
-          ? date.toLocaleDateString([], { weekday: "narrow" })
-          : date.toLocaleDateString([], { month: "numeric", day: "numeric" });
+        range === "weekly"
+          ? date.toLocaleDateString([], { month: "numeric", day: "numeric" })
+          : !wide.matches
+            ? date.toLocaleDateString([], { weekday: "narrow" })
+            : (bars.length - 1 - i) % 7 === 0
+              ? date.toLocaleDateString([], { month: "short", day: "numeric" })
+              : "";
       const text = `${barLabel(b)}: ${barValue(b)}`;
       return `<button class="col" data-index="${i}" data-empty="${b.used === null}" data-current="${b.current}"
           aria-label="${escape(text)}" title="${escape(text)}">
@@ -278,8 +285,12 @@ function renderHistory() {
 }
 
 async function loadHistory() {
-  if (historyPanel.hidden) return;
-  history = await invoke<ProviderHistory[]>("get_history", { utcOffsetMinutes: -new Date().getTimezoneOffset() });
+  if (historyPanel.hidden && !wide.matches) return;
+  history = await invoke<ProviderHistory[]>("get_history", {
+    utcOffsetMinutes: -new Date().getTimezoneOffset(),
+    days: wide.matches ? 30 : 14,
+    weeks: wide.matches ? 12 : 8,
+  });
   renderHistory();
 }
 
@@ -339,3 +350,5 @@ invoke<Snapshot>("get_snapshot").then((s) => {
 setInterval(render, 30_000);
 // New readings arrive every few minutes at most, so a slow refresh keeps the chart current.
 setInterval(loadHistory, 60_000);
+wide.addEventListener("change", loadHistory);
+loadHistory();
