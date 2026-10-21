@@ -1,6 +1,7 @@
-//! Lists open Claude Code chats and their context from local files.
+//! Lists recent Claude Code chats and their context from local files.
 //!
 //! Claude Code registers each running session in `~/.claude/sessions/<pid>.json`.
+//! Closed chats are found from transcripts written within the recent window.
 //! Context comes from the last assistant usage in the session transcript. Transcripts
 //! do not record the context window, so it is estimated from the model name, and
 //! only the token count is shown for models with no known window.
@@ -13,7 +14,9 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use crate::jsonl::{consume_lines, contains, project_label, read_from};
-use crate::model::{Activity, ChatContext, Confidence, ContextMeasure, unix_secs};
+use crate::model::{
+    Activity, ChatContext, Confidence, ContextMeasure, RECENT_CHAT_SECS, unix_secs,
+};
 
 const PROVIDER: &str = "claude";
 const ONE_MILLION: u64 = 1_000_000;
@@ -51,6 +54,12 @@ struct Record {
     #[serde(rename = "requestedModel")]
     requested_model: Option<String>,
     message: Option<Message>,
+    cwd: Option<String>,
+    entrypoint: Option<String>,
+    #[serde(rename = "customTitle")]
+    custom_title: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +106,10 @@ struct Transcript {
     modified: Option<SystemTime>,
     model: Option<String>,
     context: Option<ContextMeasure>,
+    cwd: Option<String>,
+    entrypoint: Option<String>,
+    custom_title: Option<String>,
+    ai_title: Option<String>,
 }
 
 pub struct ClaudeSessions {
@@ -118,6 +131,7 @@ impl ClaudeSessions {
         let live = live_sessions(&self.registry_dir, now);
         let mut transcripts = HashMap::with_capacity(live.len());
         let mut chats = Vec::with_capacity(live.len());
+        let live_ids: Vec<String> = live.iter().map(|e| e.session_id.clone()).collect();
         for entry in live {
             let mut transcript = self
                 .transcripts
@@ -128,9 +142,13 @@ impl ClaudeSessions {
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: entry.name.clone().filter(|n| {
-                    !n.trim().is_empty() && entry.name_source.as_deref() != Some("derived")
-                }),
+                title: entry
+                    .name
+                    .clone()
+                    .filter(|n| {
+                        !n.trim().is_empty() && entry.name_source.as_deref() != Some("derived")
+                    })
+                    .or_else(|| transcript.title()),
                 surface: entry.entrypoint.as_deref().map(surface_label),
                 project: entry.cwd.as_deref().and_then(project_label),
                 cwd: entry.cwd.clone(),
@@ -151,9 +169,58 @@ impl ClaudeSessions {
             });
             transcripts.insert(entry.session_id, transcript);
         }
+        for (id, path) in recent_transcripts(&self.projects_dir, now) {
+            if live_ids.contains(&id) {
+                continue;
+            }
+            let mut transcript = self.transcripts.remove(&id).unwrap_or_default();
+            transcript.read_new(&path);
+            chats.push(ChatContext {
+                provider: PROVIDER,
+                title: transcript.title(),
+                surface: transcript.entrypoint.as_deref().map(surface_label),
+                project: transcript.cwd.as_deref().and_then(project_label),
+                cwd: transcript.cwd.clone(),
+                model: transcript.model.clone(),
+                context: transcript.context.clone(),
+                last_activity: transcript.modified.map(unix_secs).unwrap_or(0),
+                subagents: 0,
+                activity: None,
+                id: id.clone(),
+            });
+            transcripts.insert(id, transcript);
+        }
         self.transcripts = transcripts;
         chats
     }
+}
+
+/// Top-level transcripts written within the recent window, keyed by session id.
+/// Subagent transcripts live one folder deeper and are skipped.
+fn recent_transcripts(projects_dir: &Path, now: SystemTime) -> Vec<(String, PathBuf)> {
+    let Ok(projects) = fs::read_dir(projects_dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for project in projects.flatten() {
+        let Ok(files) = fs::read_dir(project.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            let recent = file
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|m| unix_secs(now) - unix_secs(m) <= RECENT_CHAT_SECS);
+            if let (true, Some(id)) = (recent, path.file_stem()) {
+                found.push((id.to_string_lossy().into_owned(), path));
+            }
+        }
+    }
+    found
 }
 
 impl Transcript {
@@ -171,14 +238,35 @@ impl Transcript {
         }
     }
 
+    fn title(&self) -> Option<String> {
+        self.custom_title
+            .clone()
+            .or_else(|| self.ai_title.clone())
+            .filter(|t| !t.trim().is_empty())
+    }
+
     fn apply(&mut self, line: &[u8]) {
-        // Cheap prefilter: skip user, tool, and attachment records without parsing.
-        if !contains(line, b"\"type\":\"assistant\"") && !contains(line, b"compact_boundary") {
+        // Cheap prefilter: skip user, tool, and attachment records without parsing,
+        // apart from the first one that names the folder.
+        let wanted = contains(line, b"\"type\":\"assistant\"")
+            || contains(line, b"compact_boundary")
+            || contains(line, b"-title\"")
+            || (self.cwd.is_none() && contains(line, b"\"cwd\""));
+        if !wanted {
             return;
         }
         let Ok(rec) = serde_json::from_slice::<Record>(line) else {
             return;
         };
+        if self.cwd.is_none() && rec.cwd.is_some() {
+            self.cwd = rec.cwd.clone();
+            self.entrypoint = rec.entrypoint.clone();
+        }
+        match rec.kind.as_str() {
+            "custom-title" => self.custom_title = rec.custom_title.clone(),
+            "ai-title" => self.ai_title = rec.ai_title.clone(),
+            _ => {}
+        }
         if rec.kind == "system" && rec.subtype.as_deref() == Some("compact_boundary") {
             // The old measurement no longer describes the compacted context.
             self.context = None;
@@ -223,6 +311,7 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
         // Window derived from the model name, not reported by Claude itself.
         confidence: Confidence::Estimated,
         observed_at,
+        limited: false,
     }
 }
 
@@ -380,6 +469,39 @@ mod tests {
         let t = read(&[assistant("claude-opus-5-5[1m]", 1, 99, ""), side]);
         assert_eq!(t.context.as_ref().unwrap().used_tokens, 100);
         assert!(!format!("{:?}{:?}", t.context, t.model).contains(SENTINEL));
+    }
+
+    #[test]
+    fn closed_chats_keep_their_title_and_folder() {
+        let first = r#"{"type":"user","cwd":"/home/u/Code/my-app","entrypoint":"cli","message":{"content":"SENTINEL-PRIVATE-CLAUDE-4410"}}"#;
+        let later = r#"{"type":"user","cwd":"/elsewhere","entrypoint":"sdk-cli"}"#;
+        let ai = r#"{"type":"ai-title","aiTitle":"Auto title","sessionId":"abc"}"#;
+        let custom = r#"{"type":"custom-title","customTitle":"Fix login","sessionId":"abc"}"#;
+        let t = read(&[first.into(), later.into(), ai.into()]);
+        assert_eq!(t.cwd.as_deref(), Some("/home/u/Code/my-app"));
+        assert_eq!(t.entrypoint.as_deref(), Some("cli"));
+        assert_eq!(t.title().as_deref(), Some("Auto title"));
+        let t = read(&[first.into(), ai.into(), custom.into()]);
+        assert_eq!(t.title().as_deref(), Some("Fix login"));
+    }
+
+    #[test]
+    fn only_recent_top_level_transcripts_are_listed() {
+        let dir = std::env::temp_dir().join(format!("acm-recent-{}", std::process::id()));
+        let project = dir.join("-home-u-app");
+        fs::create_dir_all(project.join("abc").join("subagents")).unwrap();
+        fs::write(project.join("abc.jsonl"), "").unwrap();
+        fs::write(
+            project.join("abc").join("subagents").join("agent-1.jsonl"),
+            "",
+        )
+        .unwrap();
+        let now = SystemTime::now();
+        let found = recent_transcripts(&dir, now);
+        assert_eq!(found, vec![("abc".to_string(), project.join("abc.jsonl"))]);
+        let tomorrow = now + std::time::Duration::from_secs(RECENT_CHAT_SECS as u64 + 60);
+        assert!(recent_transcripts(&dir, tomorrow).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
