@@ -236,6 +236,17 @@ impl Snapshot {
     }
 }
 
+/// Providers report reset times with a little jitter between readings.
+pub const RESET_JITTER_SECS: i64 = 60 * 60;
+
+/// Two reset times within the jitter are the same window.
+pub fn same_reset(a: Option<i64>, b: Option<i64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() <= RESET_JITTER_SECS,
+        (a, b) => a == b,
+    }
+}
+
 pub fn unix_secs(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

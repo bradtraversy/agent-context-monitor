@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::model::{
-    CRITICAL_PERCENT, ChatContext, LimitWindow, Snapshot, TRAY_CHAT_SECS, unix_secs,
+    CRITICAL_PERCENT, ChatContext, LimitWindow, Snapshot, TRAY_CHAT_SECS, same_reset, unix_secs,
 };
 
 #[derive(Debug, PartialEq)]
@@ -21,7 +21,7 @@ pub struct Alert {
 pub struct Alerts {
     chats: HashSet<String>,
     /// Provider, window label, and reset time, so a new window can alert again.
-    windows: HashSet<(String, &'static str, Option<i64>)>,
+    windows: Vec<(String, &'static str, Option<i64>)>,
 }
 
 impl Alerts {
@@ -69,10 +69,13 @@ impl Alerts {
                 if *used_percent < CRITICAL_PERCENT {
                     continue;
                 }
-                if self
-                    .windows
-                    .insert((usage.provider.to_string(), label, *resets_at))
-                {
+                // Reset times jitter between readings, so a near match is the same window.
+                let seen = self.windows.iter().any(|(p, l, r)| {
+                    p == usage.provider && *l == label && same_reset(*r, *resets_at)
+                });
+                if !seen {
+                    self.windows
+                        .push((usage.provider.to_string(), label, *resets_at));
                     let what = if label == "session" {
                         "session"
                     } else {
@@ -199,9 +202,18 @@ mod tests {
                 .check(&snapshot(vec![usage(97.0, 1, false)], vec![]), now())
                 .is_empty()
         );
+        // A reset time that moved by a few seconds is still the same window.
+        assert!(
+            alerts
+                .check(&snapshot(vec![usage(96.0, 3, false)], vec![]), now())
+                .is_empty()
+        );
         assert_eq!(
             alerts
-                .check(&snapshot(vec![usage(91.0, 2, false)], vec![]), now())
+                .check(
+                    &snapshot(vec![usage(91.0, 1 + 7 * 86_400, false)], vec![]),
+                    now()
+                )
                 .len(),
             1
         );

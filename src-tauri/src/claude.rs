@@ -192,7 +192,12 @@ enum Failure {
 #[cfg(target_os = "macos")]
 fn keychain_credentials() -> Option<Vec<u8>> {
     let out = std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

@@ -165,7 +165,13 @@ fn search_dirs() -> Vec<PathBuf> {
         for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
             dirs.push(PathBuf::from(dir));
         }
-        for dir in [".local/bin", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin"] {
+        for dir in [
+            ".local/bin",
+            ".npm-global/bin",
+            ".bun/bin",
+            ".volta/bin",
+            ".cargo/bin",
+        ] {
             dirs.push(home.join(dir));
         }
         // nvm keeps one folder per Node version; prefer the newest.

@@ -6,12 +6,10 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{LimitWindow, ProviderUsage, UsageStatus, unix_secs};
+use crate::model::{LimitWindow, ProviderUsage, UsageStatus, same_reset, unix_secs};
 
 const KEEP_SECS: i64 = 120 * DAY;
 const DAY: i64 = 24 * 60 * 60;
-/// Providers report reset times with a little jitter between readings.
-const RESET_JITTER_SECS: i64 = 60 * 60;
 /// A smaller drop in weekly usage is rounding, not a reset.
 const RESET_DROP_PERCENT: f64 = 5.0;
 
@@ -30,13 +28,6 @@ struct Sample {
 impl Sample {
     fn same_reading(&self, other: &Sample) -> bool {
         self.s == other.s && self.w == other.w && same_reset(self.r, other.r)
-    }
-}
-
-fn same_reset(a: Option<i64>, b: Option<i64>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => (a - b).abs() <= RESET_JITTER_SECS,
-        (a, b) => a == b,
     }
 }
 
