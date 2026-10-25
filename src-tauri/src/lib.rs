@@ -74,6 +74,9 @@ pub fn run() {
             set_context_limit
         ])
         .setup(|app| {
+            // A menu bar app on macOS, so no Dock icon next to the tray dot.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let path = app
                 .path()
                 .app_config_dir()
