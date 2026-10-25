@@ -61,6 +61,13 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
     if let Some(path) = bin.parent().and_then(path_with) {
         command.env("PATH", path);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Without this, Windows opens a console window for Codex on every check.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
