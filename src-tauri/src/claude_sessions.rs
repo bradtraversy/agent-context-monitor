@@ -13,7 +13,9 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::jsonl::{consume_lines, contains, project_label, read_from};
+#[cfg(test)]
+use crate::jsonl::consume_lines;
+use crate::jsonl::{contains, project_label, read_lines_from, rescan_due};
 use crate::model::{
     Activity, ChatContext, Confidence, ContextMeasure, RECENT_CHAT_SECS, unix_secs,
 };
@@ -102,6 +104,7 @@ struct Iteration {
 
 #[derive(Default)]
 struct Transcript {
+    path: Option<PathBuf>,
     offset: u64,
     modified: Option<SystemTime>,
     model: Option<String>,
@@ -116,6 +119,9 @@ pub struct ClaudeSessions {
     registry_dir: PathBuf,
     projects_dir: PathBuf,
     transcripts: HashMap<String, Transcript>,
+    /// Recent closed chats from the last folder search.
+    recent: Vec<(String, PathBuf)>,
+    last_scan: Option<SystemTime>,
 }
 
 impl ClaudeSessions {
@@ -124,10 +130,18 @@ impl ClaudeSessions {
             registry_dir: claude_home.join("sessions"),
             projects_dir: claude_home.join("projects"),
             transcripts: HashMap::new(),
+            recent: Vec::new(),
+            last_scan: None,
         }
     }
 
     pub fn chats(&mut self, now: SystemTime) -> Vec<ChatContext> {
+        // Every project folder holds every chat ever, so it is searched only now and then.
+        let rescan = rescan_due(self.last_scan, now);
+        if rescan {
+            self.last_scan = Some(now);
+            self.recent = recent_transcripts(&self.projects_dir, now);
+        }
         let live = live_sessions(&self.registry_dir, now);
         let mut transcripts = HashMap::with_capacity(live.len());
         let mut chats = Vec::with_capacity(live.len());
@@ -137,8 +151,13 @@ impl ClaudeSessions {
                 .transcripts
                 .remove(&entry.session_id)
                 .unwrap_or_default();
-            if let Some(path) = transcript_path(&self.projects_dir, &entry) {
-                transcript.read_new(&path);
+            if transcript.path.is_none() {
+                transcript.path = transcript_path(&self.projects_dir, &entry, rescan);
+            }
+            if let Some(path) = transcript.path.clone()
+                && !transcript.read_new(&path)
+            {
+                transcript.path = None;
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
@@ -169,12 +188,13 @@ impl ClaudeSessions {
             });
             transcripts.insert(entry.session_id, transcript);
         }
-        for (id, path) in recent_transcripts(&self.projects_dir, now) {
-            if live_ids.contains(&id) {
+        for (id, path) in &self.recent {
+            if live_ids.contains(id) {
                 continue;
             }
+            let id = id.clone();
             let mut transcript = self.transcripts.remove(&id).unwrap_or_default();
-            transcript.read_new(&path);
+            transcript.read_new(path);
             chats.push(ChatContext {
                 provider: PROVIDER,
                 title: transcript.title(),
@@ -224,18 +244,23 @@ fn recent_transcripts(projects_dir: &Path, now: SystemTime) -> Vec<(String, Path
 }
 
 impl Transcript {
-    fn read_new(&mut self, path: &Path) {
-        let Ok(meta) = fs::metadata(path) else { return };
+    /// Reads lines added since last time. False if the file is gone.
+    fn read_new(&mut self, path: &Path) -> bool {
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
         if meta.len() < self.offset {
-            *self = Transcript::default();
+            *self = Transcript {
+                path: self.path.take(),
+                ..Transcript::default()
+            };
         }
         self.modified = meta.modified().ok();
-        if meta.len() == self.offset {
-            return;
+        if meta.len() > self.offset {
+            let offset = self.offset;
+            self.offset += read_lines_from(path, offset, |line| self.apply(line));
         }
-        if let Ok(chunk) = read_from(path, self.offset) {
-            self.offset += consume_lines(&chunk, |line| self.apply(line));
-        }
+        true
     }
 
     fn title(&self) -> Option<String> {
@@ -378,7 +403,8 @@ fn is_alive(entry: &RegistryEntry, now: SystemTime) -> bool {
 }
 
 /// Claude stores each transcript as `projects/<encoded cwd>/<session id>.jsonl`.
-fn transcript_path(projects_dir: &Path, entry: &RegistryEntry) -> Option<PathBuf> {
+/// Searching every project folder is slow, so it only happens when `search` is set.
+fn transcript_path(projects_dir: &Path, entry: &RegistryEntry, search: bool) -> Option<PathBuf> {
     let file = format!("{}.jsonl", entry.session_id);
     if let Some(cwd) = &entry.cwd {
         let encoded: String = cwd
@@ -389,6 +415,9 @@ fn transcript_path(projects_dir: &Path, entry: &RegistryEntry) -> Option<PathBuf
         if direct.is_file() {
             return Some(direct);
         }
+    }
+    if !search {
+        return None;
     }
     fs::read_dir(projects_dir)
         .ok()?
@@ -522,7 +551,7 @@ mod tests {
             updated_at_ms: None,
         };
         assert_eq!(
-            transcript_path(&dir, &entry),
+            transcript_path(&dir, &entry, false),
             Some(project.join("abc.jsonl"))
         );
         fs::remove_file(project.join("abc.jsonl")).unwrap();
