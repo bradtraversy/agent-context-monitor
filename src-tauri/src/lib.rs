@@ -63,6 +63,10 @@ pub fn run() {
             tray::show_window(app);
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(SharedSnapshot::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
