@@ -5,7 +5,7 @@
 //! request. Codex uses its own login; ACM never reads Codex's token.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -50,13 +50,18 @@ struct Window {
 
 pub fn fetch(now: SystemTime) -> Option<RateReading> {
     let bin = find_codex()?;
-    let mut child = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // An npm install of Codex is a Node script, and an app opened from the Dock or
+    // Start menu may not have Node on its PATH. Node usually sits next to it.
+    if let Some(path) = bin.parent().and_then(path_with) {
+        command.env("PATH", path);
+    }
+    let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -72,7 +77,10 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
     if let Some(mut stdin) = child.stdin.take() {
         let requests = format!(
             "{}\n{}\n{}\n",
-            r#"{"method":"initialize","id":0,"params":{"clientInfo":{"name":"agent-context-monitor","title":"Agent Context Monitor","version":"0.1.0"}}}"#,
+            format_args!(
+                r#"{{"method":"initialize","id":0,"params":{{"clientInfo":{{"name":"agent-context-monitor","title":"Agent Context Monitor","version":"{}"}}}}}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
             r#"{"method":"initialized"}"#,
             format_args!(r#"{{"method":"account/rateLimits/read","id":{REQUEST_ID}}}"#),
         );
@@ -111,22 +119,63 @@ fn reading_from(mut result: ReadResult, now: SystemTime) -> Option<RateReading> 
     })
 }
 
-/// Codex ships inside the desktop app as well as on PATH.
+/// Codex ships inside the desktop app as well as on PATH. An app opened from the Dock,
+/// Start menu, or a launcher gets a much shorter PATH than a terminal, so the usual
+/// install folders are searched too.
 fn find_codex() -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
-    let on_path = std::env::var_os("PATH")
+    let names: &[&str] = if cfg!(windows) {
+        &["codex.exe", "codex.cmd"]
+    } else {
+        &["codex"]
+    };
+    search_dirs()
         .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|dir| dir.join(exe));
-    let bundled = [
-        "/opt/codex-desktop/resources/codex",
-        "/usr/lib/chatgpt/resources/codex",
-        "/Applications/Codex.app/Contents/Resources/codex",
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ]
-    .into_iter()
-    .map(PathBuf::from);
-    on_path.chain(bundled).find(|p| p.is_file())
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .chain(BUNDLED.iter().map(PathBuf::from))
+        .find(|p| p.is_file())
+}
+
+const BUNDLED: &[&str] = &[
+    "/opt/codex-desktop/resources/codex",
+    "/usr/lib/chatgpt/resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+];
+
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = std::env::home_dir().unwrap_or_default();
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Programs").join("codex"));
+        }
+    } else {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            dirs.push(PathBuf::from(dir));
+        }
+        for dir in [".local/bin", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin"] {
+            dirs.push(home.join(dir));
+        }
+        // nvm keeps one folder per Node version; prefer the newest.
+        let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
+            .map(|entries| entries.flatten().map(|e| e.path().join("bin")).collect())
+            .unwrap_or_default();
+        nvm.sort();
+        dirs.extend(nvm.into_iter().rev());
+    }
+    dirs
+}
+
+/// The current PATH with `dir` in front, so Codex's own folder is searched first.
+fn path_with(dir: &Path) -> Option<std::ffi::OsString> {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current));
+    std::env::join_paths(dirs).ok()
 }
 
 #[cfg(test)]
