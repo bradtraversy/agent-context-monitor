@@ -31,11 +31,11 @@ pub fn start(app: AppHandle) {
     let home = std::env::home_dir().unwrap_or_default();
     let claude_home = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
-    let history_path = app
+    let data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| home.join(".agent-context-monitor"))
-        .join("usage-history.jsonl");
+        .unwrap_or_else(|_| home.join(".agent-context-monitor"));
+    let history_path = data_dir.join("usage-history.jsonl");
     app.manage(HistoryFile(history_path.clone()));
 
     // Live usage checks are slow, so they run apart from the file loop and only when
@@ -82,7 +82,7 @@ pub fn start(app: AppHandle) {
     }
 
     thread::spawn(move || {
-        let mut alerts = Alerts::default();
+        let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
         let mut claude_sessions = ClaudeSessions::new(claude_home);
         let mut history = Recorder::open(history_path, SystemTime::now());
