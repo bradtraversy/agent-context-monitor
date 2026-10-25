@@ -58,6 +58,10 @@ fn get_history(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must come first: opening the app again brings up the window that's already running.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .manage(SharedSnapshot::default())
         .invoke_handler(tauri::generate_handler![
