@@ -4,7 +4,7 @@
 //! Closed chats are found from transcripts written within the recent window.
 //! Context comes from the last assistant usage in the session transcript. Transcripts
 //! do not record the context window, so it is estimated from the model name, and
-//! only the token count is shown for models with no known window.
+//! only the token count is shown for models that aren't Claude.
 
 use std::collections::HashMap;
 use std::fs;
@@ -328,7 +328,7 @@ impl Transcript {
 }
 
 fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasure {
-    let window = model.and_then(window_from_model);
+    let window = model.and_then(|m| window_from_model(m, used));
     ContextMeasure {
         used_tokens: used,
         context_window: window,
@@ -340,20 +340,18 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
     }
 }
 
-/// Windows observed from Claude Code 2.1.302 on 2026-10-18: Opus and Sonnet 5.x
-/// run with 1M by default and Haiku with 200k. Unlisted models stay unknown.
-fn window_from_model(model: &str) -> Option<u64> {
-    if model.ends_with("[1m]") {
+/// Claude Code marks a model running with the 1M window with a `[1m]` suffix, as in
+/// `claude-opus-5-5[1m]`. Other Claude models use the standard 200k window, unless
+/// the chat has already gone past it. Models that aren't Claude stay unknown.
+fn window_from_model(model: &str, used: u64) -> Option<u64> {
+    if model.ends_with("[1m]") || used > TWO_HUNDRED_K {
         return Some(ONE_MILLION);
     }
-    let id = model.strip_prefix("claude-").unwrap_or(model);
-    if id.starts_with("opus-5") || id.starts_with("sonnet-5") {
-        Some(ONE_MILLION)
-    } else if id.starts_with("haiku") {
-        Some(TWO_HUNDRED_K)
-    } else {
-        None
-    }
+    let model = model.to_ascii_lowercase();
+    ["claude", "opus", "sonnet", "haiku"]
+        .iter()
+        .any(|family| model.contains(family))
+        .then_some(TWO_HUNDRED_K)
 }
 
 fn surface_label(entrypoint: &str) -> String {
@@ -459,14 +457,31 @@ mod tests {
     fn window_is_estimated_from_the_model_name() {
         let window = |model| read(&[assistant(model, 10, 990, "")]).context.unwrap();
         assert_eq!(
-            window("claude-sonnet-5-5").context_window,
+            window("claude-sonnet-5-5[1m]").context_window,
             Some(ONE_MILLION)
+        );
+        assert_eq!(
+            window("claude-opus-5-5").context_window,
+            Some(TWO_HUNDRED_K)
+        );
+        assert_eq!(
+            window("us.anthropic.claude-opus-4-1").context_window,
+            Some(TWO_HUNDRED_K)
         );
         assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
         let unknown = window("some-future-model");
         assert_eq!(unknown.used_tokens, 1_000);
         assert_eq!(unknown.context_window, None);
         assert_eq!(unknown.used_percent, None);
+    }
+
+    #[test]
+    fn a_chat_past_200k_must_have_the_1m_window() {
+        let ctx = read(&[assistant("claude-opus-5-5", 1, 299_999, "")])
+            .context
+            .unwrap();
+        assert_eq!(ctx.context_window, Some(ONE_MILLION));
+        assert_eq!(ctx.used_percent, Some(30.0));
     }
 
     #[test]
