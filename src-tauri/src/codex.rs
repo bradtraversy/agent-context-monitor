@@ -97,6 +97,8 @@ struct TokenUsage {
 
 #[derive(Deserialize)]
 struct RateLimits {
+    /// Codex can report other limits too; only the "codex" one is its plan usage.
+    limit_id: Option<String>,
     primary: Option<RateWindow>,
     secondary: Option<RateWindow>,
     plan_type: Option<String>,
@@ -300,7 +302,9 @@ impl SessionFile {
                 limited: false,
             });
         }
-        if let Some(limits) = payload.rate_limits {
+        if let Some(limits) = payload.rate_limits
+            && limits.limit_id.as_deref().is_none_or(|id| id == "codex")
+        {
             self.rate = Some(RateReading {
                 observed_at,
                 plan: limits.plan_type,
@@ -423,6 +427,16 @@ mod tests {
             usage.weekly,
             LimitWindow::ResetSinceReading { resets_at: 1000 }
         );
+    }
+
+    #[test]
+    fn other_limits_are_not_codex_usage() {
+        let other = r#"{"limit_id":"other","primary":{"used_percent":50.0,"window_minutes":10080,"resets_at":2000000000}}"#;
+        let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, other)]);
+        assert!(f.rate.is_none());
+        let codex = other.replace("other", "codex");
+        let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, &codex)]);
+        assert!(f.rate.is_some());
     }
 
     #[test]
