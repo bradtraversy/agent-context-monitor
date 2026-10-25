@@ -10,7 +10,9 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use crate::jsonl::{collect_jsonl, consume_lines, contains, project_label, read_from};
+#[cfg(test)]
+use crate::jsonl::consume_lines;
+use crate::jsonl::{collect_jsonl, contains, project_label, read_lines_from, rescan_due};
 
 use crate::model::{
     ChatContext, Confidence, ContextMeasure, LimitWindow, ProviderUsage, RECENT_CHAT_SECS,
@@ -95,6 +97,8 @@ struct TokenUsage {
 
 #[derive(Deserialize)]
 struct RateLimits {
+    /// Codex can report other limits too; only the "codex" one is its plan usage.
+    limit_id: Option<String>,
     primary: Option<RateWindow>,
     secondary: Option<RateWindow>,
     plan_type: Option<String>,
@@ -112,6 +116,7 @@ pub struct CodexSource {
     files: HashMap<PathBuf, SessionFile>,
     titles: HashMap<String, String>,
     index_offset: u64,
+    last_scan: Option<SystemTime>,
 }
 
 impl CodexSource {
@@ -122,14 +127,27 @@ impl CodexSource {
             files: HashMap::new(),
             titles: HashMap::new(),
             index_offset: 0,
+            last_scan: None,
         }
     }
 
-    /// Reads only bytes appended since the last refresh.
+    /// Reads only bytes appended since the last refresh. The sessions folder holds
+    /// every chat ever, so it is searched for new files only now and then.
     pub fn refresh(&mut self, now: SystemTime) {
         self.refresh_titles();
         let mut seen = Vec::new();
-        collect_jsonl(&self.sessions_dir, &mut seen);
+        if rescan_due(self.last_scan, now) {
+            self.last_scan = Some(now);
+            collect_jsonl(&self.sessions_dir, &mut seen);
+        } else {
+            for path in self.files.keys() {
+                if let Ok(meta) = fs::metadata(path)
+                    && let Ok(modified) = meta.modified()
+                {
+                    seen.push((path.clone(), modified, meta.len()));
+                }
+            }
+        }
         let mut live = HashMap::with_capacity(seen.len());
         for (path, modified, len) in seen {
             if now.duration_since(modified).unwrap_or_default() > LOOKBACK {
@@ -139,10 +157,9 @@ impl CodexSource {
             if len < state.offset {
                 state = SessionFile::default();
             }
-            if len > state.offset
-                && let Ok(chunk) = read_from(&path, state.offset)
-            {
-                state.offset += consume_lines(&chunk, |line| state.apply(line));
+            if len > state.offset {
+                let offset = state.offset;
+                state.offset += read_lines_from(&path, offset, |line| state.apply(line));
             }
             state.modified = Some(modified);
             live.insert(path, state);
@@ -161,16 +178,14 @@ impl CodexSource {
         if meta.len() == self.index_offset {
             return;
         }
-        if let Ok(chunk) = read_from(&self.index_path, self.index_offset) {
-            let titles = &mut self.titles;
-            self.index_offset += consume_lines(&chunk, |line| {
-                if let Ok(entry) = serde_json::from_slice::<IndexEntry>(line)
-                    && let Some(name) = entry.thread_name.filter(|n| !n.trim().is_empty())
-                {
-                    titles.insert(entry.id, name);
-                }
-            });
-        }
+        let titles = &mut self.titles;
+        self.index_offset += read_lines_from(&self.index_path, self.index_offset, |line| {
+            if let Ok(entry) = serde_json::from_slice::<IndexEntry>(line)
+                && let Some(name) = entry.thread_name.filter(|n| !n.trim().is_empty())
+            {
+                titles.insert(entry.id, name);
+            }
+        });
     }
 
     /// Unix seconds of the newest usage reading found in session files.
@@ -287,7 +302,9 @@ impl SessionFile {
                 limited: false,
             });
         }
-        if let Some(limits) = payload.rate_limits {
+        if let Some(limits) = payload.rate_limits
+            && limits.limit_id.as_deref().is_none_or(|id| id == "codex")
+        {
             self.rate = Some(RateReading {
                 observed_at,
                 plan: limits.plan_type,
@@ -410,6 +427,16 @@ mod tests {
             usage.weekly,
             LimitWindow::ResetSinceReading { resets_at: 1000 }
         );
+    }
+
+    #[test]
+    fn other_limits_are_not_codex_usage() {
+        let other = r#"{"limit_id":"other","primary":{"used_percent":50.0,"window_minutes":10080,"resets_at":2000000000}}"#;
+        let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, other)]);
+        assert!(f.rate.is_none());
+        let codex = other.replace("other", "codex");
+        let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, &codex)]);
+        assert!(f.rate.is_some());
     }
 
     #[test]

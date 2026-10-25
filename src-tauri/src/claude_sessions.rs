@@ -4,7 +4,7 @@
 //! Closed chats are found from transcripts written within the recent window.
 //! Context comes from the last assistant usage in the session transcript. Transcripts
 //! do not record the context window, so it is estimated from the model name, and
-//! only the token count is shown for models with no known window.
+//! only the token count is shown for models that aren't Claude.
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,7 +13,9 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::jsonl::{consume_lines, contains, project_label, read_from};
+#[cfg(test)]
+use crate::jsonl::consume_lines;
+use crate::jsonl::{contains, project_label, read_lines_from, rescan_due};
 use crate::model::{
     Activity, ChatContext, Confidence, ContextMeasure, RECENT_CHAT_SECS, unix_secs,
 };
@@ -102,6 +104,7 @@ struct Iteration {
 
 #[derive(Default)]
 struct Transcript {
+    path: Option<PathBuf>,
     offset: u64,
     modified: Option<SystemTime>,
     model: Option<String>,
@@ -116,6 +119,9 @@ pub struct ClaudeSessions {
     registry_dir: PathBuf,
     projects_dir: PathBuf,
     transcripts: HashMap<String, Transcript>,
+    /// Recent closed chats from the last folder search.
+    recent: Vec<(String, PathBuf)>,
+    last_scan: Option<SystemTime>,
 }
 
 impl ClaudeSessions {
@@ -124,10 +130,18 @@ impl ClaudeSessions {
             registry_dir: claude_home.join("sessions"),
             projects_dir: claude_home.join("projects"),
             transcripts: HashMap::new(),
+            recent: Vec::new(),
+            last_scan: None,
         }
     }
 
     pub fn chats(&mut self, now: SystemTime) -> Vec<ChatContext> {
+        // Every project folder holds every chat ever, so it is searched only now and then.
+        let rescan = rescan_due(self.last_scan, now);
+        if rescan {
+            self.last_scan = Some(now);
+            self.recent = recent_transcripts(&self.projects_dir, now);
+        }
         let live = live_sessions(&self.registry_dir, now);
         let mut transcripts = HashMap::with_capacity(live.len());
         let mut chats = Vec::with_capacity(live.len());
@@ -137,8 +151,13 @@ impl ClaudeSessions {
                 .transcripts
                 .remove(&entry.session_id)
                 .unwrap_or_default();
-            if let Some(path) = transcript_path(&self.projects_dir, &entry) {
-                transcript.read_new(&path);
+            if transcript.path.is_none() {
+                transcript.path = transcript_path(&self.projects_dir, &entry, rescan);
+            }
+            if let Some(path) = transcript.path.clone()
+                && !transcript.read_new(&path)
+            {
+                transcript.path = None;
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
@@ -169,12 +188,13 @@ impl ClaudeSessions {
             });
             transcripts.insert(entry.session_id, transcript);
         }
-        for (id, path) in recent_transcripts(&self.projects_dir, now) {
-            if live_ids.contains(&id) {
+        for (id, path) in &self.recent {
+            if live_ids.contains(id) {
                 continue;
             }
+            let id = id.clone();
             let mut transcript = self.transcripts.remove(&id).unwrap_or_default();
-            transcript.read_new(&path);
+            transcript.read_new(path);
             chats.push(ChatContext {
                 provider: PROVIDER,
                 title: transcript.title(),
@@ -224,18 +244,23 @@ fn recent_transcripts(projects_dir: &Path, now: SystemTime) -> Vec<(String, Path
 }
 
 impl Transcript {
-    fn read_new(&mut self, path: &Path) {
-        let Ok(meta) = fs::metadata(path) else { return };
+    /// Reads lines added since last time. False if the file is gone.
+    fn read_new(&mut self, path: &Path) -> bool {
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
         if meta.len() < self.offset {
-            *self = Transcript::default();
+            *self = Transcript {
+                path: self.path.take(),
+                ..Transcript::default()
+            };
         }
         self.modified = meta.modified().ok();
-        if meta.len() == self.offset {
-            return;
+        if meta.len() > self.offset {
+            let offset = self.offset;
+            self.offset += read_lines_from(path, offset, |line| self.apply(line));
         }
-        if let Ok(chunk) = read_from(path, self.offset) {
-            self.offset += consume_lines(&chunk, |line| self.apply(line));
-        }
+        true
     }
 
     fn title(&self) -> Option<String> {
@@ -303,7 +328,7 @@ impl Transcript {
 }
 
 fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasure {
-    let window = model.and_then(window_from_model);
+    let window = model.and_then(|m| window_from_model(m, used));
     ContextMeasure {
         used_tokens: used,
         context_window: window,
@@ -315,20 +340,18 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
     }
 }
 
-/// Windows observed from Claude Code 2.1.302 on 2026-10-18: Opus and Sonnet 5.x
-/// run with 1M by default and Haiku with 200k. Unlisted models stay unknown.
-fn window_from_model(model: &str) -> Option<u64> {
-    if model.ends_with("[1m]") {
+/// Claude Code marks a model running with the 1M window with a `[1m]` suffix, as in
+/// `claude-opus-5-5[1m]`. Other Claude models use the standard 200k window, unless
+/// the chat has already gone past it. Models that aren't Claude stay unknown.
+fn window_from_model(model: &str, used: u64) -> Option<u64> {
+    if model.ends_with("[1m]") || used > TWO_HUNDRED_K {
         return Some(ONE_MILLION);
     }
-    let id = model.strip_prefix("claude-").unwrap_or(model);
-    if id.starts_with("opus-5") || id.starts_with("sonnet-5") {
-        Some(ONE_MILLION)
-    } else if id.starts_with("haiku") {
-        Some(TWO_HUNDRED_K)
-    } else {
-        None
-    }
+    let model = model.to_ascii_lowercase();
+    ["claude", "opus", "sonnet", "haiku"]
+        .iter()
+        .any(|family| model.contains(family))
+        .then_some(TWO_HUNDRED_K)
 }
 
 fn surface_label(entrypoint: &str) -> String {
@@ -378,7 +401,8 @@ fn is_alive(entry: &RegistryEntry, now: SystemTime) -> bool {
 }
 
 /// Claude stores each transcript as `projects/<encoded cwd>/<session id>.jsonl`.
-fn transcript_path(projects_dir: &Path, entry: &RegistryEntry) -> Option<PathBuf> {
+/// Searching every project folder is slow, so it only happens when `search` is set.
+fn transcript_path(projects_dir: &Path, entry: &RegistryEntry, search: bool) -> Option<PathBuf> {
     let file = format!("{}.jsonl", entry.session_id);
     if let Some(cwd) = &entry.cwd {
         let encoded: String = cwd
@@ -389,6 +413,9 @@ fn transcript_path(projects_dir: &Path, entry: &RegistryEntry) -> Option<PathBuf
         if direct.is_file() {
             return Some(direct);
         }
+    }
+    if !search {
+        return None;
     }
     fs::read_dir(projects_dir)
         .ok()?
@@ -430,14 +457,31 @@ mod tests {
     fn window_is_estimated_from_the_model_name() {
         let window = |model| read(&[assistant(model, 10, 990, "")]).context.unwrap();
         assert_eq!(
-            window("claude-sonnet-5-5").context_window,
+            window("claude-sonnet-5-5[1m]").context_window,
             Some(ONE_MILLION)
+        );
+        assert_eq!(
+            window("claude-opus-5-5").context_window,
+            Some(TWO_HUNDRED_K)
+        );
+        assert_eq!(
+            window("us.anthropic.claude-opus-4-1").context_window,
+            Some(TWO_HUNDRED_K)
         );
         assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
         let unknown = window("some-future-model");
         assert_eq!(unknown.used_tokens, 1_000);
         assert_eq!(unknown.context_window, None);
         assert_eq!(unknown.used_percent, None);
+    }
+
+    #[test]
+    fn a_chat_past_200k_must_have_the_1m_window() {
+        let ctx = read(&[assistant("claude-opus-5-5", 1, 299_999, "")])
+            .context
+            .unwrap();
+        assert_eq!(ctx.context_window, Some(ONE_MILLION));
+        assert_eq!(ctx.used_percent, Some(30.0));
     }
 
     #[test]
@@ -522,7 +566,7 @@ mod tests {
             updated_at_ms: None,
         };
         assert_eq!(
-            transcript_path(&dir, &entry),
+            transcript_path(&dir, &entry, false),
             Some(project.join("abc.jsonl"))
         );
         fs::remove_file(project.join("abc.jsonl")).unwrap();

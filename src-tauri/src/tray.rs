@@ -1,7 +1,8 @@
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::model::{Level, Snapshot};
 
@@ -17,16 +18,28 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let at_login = app.autolaunch().is_enabled().unwrap_or(false);
+    let login =
+        CheckMenuItem::with_id(app, "login", "Start at login", true, at_login, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &login, &quit])?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(Level::Unknown))
         .tooltip("Agent Context Monitor")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => show_window(app),
+            "login" => {
+                let autolaunch = app.autolaunch();
+                let _ = if autolaunch.is_enabled().unwrap_or(false) {
+                    autolaunch.disable()
+                } else {
+                    autolaunch.enable()
+                };
+                let _ = login.set_checked(autolaunch.is_enabled().unwrap_or(false));
+            }
             "quit" => app.exit(0),
             _ => {}
         })

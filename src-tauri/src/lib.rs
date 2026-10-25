@@ -58,7 +58,15 @@ fn get_history(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must come first: opening the app again brings up the window that's already running.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(SharedSnapshot::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
@@ -66,6 +74,9 @@ pub fn run() {
             set_context_limit
         ])
         .setup(|app| {
+            // A menu bar app on macOS, so no Dock icon next to the tray dot.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let path = app
                 .path()
                 .app_config_dir()

@@ -2,13 +2,18 @@
 //!
 //! Each alert fires once. A chat alerts again only after its context drops back
 //! below the threshold or it is picked up again after a quiet spell, and a usage
-//! window only after it resets.
+//! window only after it resets. What was sent is saved, so a restart doesn't repeat it.
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::{
-    CRITICAL_PERCENT, ChatContext, LimitWindow, Snapshot, TRAY_CHAT_SECS, unix_secs,
+    CRITICAL_PERCENT, ChatContext, LimitWindow, RESET_JITTER_SECS, Snapshot, TRAY_CHAT_SECS,
+    same_reset, unix_secs,
 };
 
 #[derive(Debug, PartialEq)]
@@ -17,15 +22,56 @@ pub struct Alert {
     pub body: String,
 }
 
-#[derive(Default)]
-pub struct Alerts {
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+struct Sent {
     chats: HashSet<String>,
     /// Provider, window label, and reset time, so a new window can alert again.
-    windows: HashSet<(String, &'static str, Option<i64>)>,
+    windows: Vec<(String, String, Option<i64>)>,
+}
+
+#[derive(Default)]
+pub struct Alerts {
+    path: Option<PathBuf>,
+    sent: Sent,
 }
 
 impl Alerts {
+    pub fn load(path: PathBuf) -> Self {
+        let sent = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        Alerts {
+            path: Some(path),
+            sent,
+        }
+    }
+
+    fn save(&self) {
+        let Some(path) = &self.path else { return };
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_vec(&self.sent) {
+            let _ = fs::write(path, json);
+        }
+    }
+
     pub fn check(&mut self, snapshot: &Snapshot, now: SystemTime) -> Vec<Alert> {
+        let before = serde_json::to_vec(&self.sent).unwrap_or_default();
+        let alerts = self.find(snapshot, now);
+        // Windows that reset long ago can't come back, so they needn't be kept.
+        let cutoff = unix_secs(now) - RESET_JITTER_SECS;
+        self.sent
+            .windows
+            .retain(|(_, _, r)| r.is_none_or(|r| r > cutoff));
+        if serde_json::to_vec(&self.sent).unwrap_or_default() != before {
+            self.save();
+        }
+        alerts
+    }
+
+    fn find(&mut self, snapshot: &Snapshot, now: SystemTime) -> Vec<Alert> {
         let mut alerts = Vec::new();
 
         let mut full = HashSet::new();
@@ -39,7 +85,7 @@ impl Alerts {
                 continue;
             }
             let key = format!("{}:{}", chat.provider, chat.id);
-            if !self.chats.contains(&key) {
+            if !self.sent.chats.contains(&key) {
                 let limited = chat.context.as_ref().is_some_and(|c| c.limited);
                 let of = if limited {
                     "your context limit"
@@ -55,7 +101,7 @@ impl Alerts {
             }
             full.insert(key);
         }
-        self.chats = full;
+        self.sent.chats = full;
 
         for usage in snapshot.usage.iter().filter(|u| !u.stale) {
             for (label, window) in [("session", &usage.session), ("weekly", &usage.weekly)] {
@@ -69,10 +115,16 @@ impl Alerts {
                 if *used_percent < CRITICAL_PERCENT {
                     continue;
                 }
-                if self
-                    .windows
-                    .insert((usage.provider.to_string(), label, *resets_at))
-                {
+                // Reset times jitter between readings, so a near match is the same window.
+                let seen = self.sent.windows.iter().any(|(p, l, r)| {
+                    p == usage.provider && l == label && same_reset(*r, *resets_at)
+                });
+                if !seen {
+                    self.sent.windows.push((
+                        usage.provider.to_string(),
+                        label.to_string(),
+                        *resets_at,
+                    ));
                     let what = if label == "session" {
                         "session"
                     } else {
@@ -160,6 +212,16 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_does_not_repeat_alerts() {
+        let dir = std::env::temp_dir().join(format!("acm-alerts-{}", std::process::id()));
+        let path = dir.join("alerts-sent.json");
+        let full = || snapshot(vec![], vec![chat(95.0, 10)]);
+        assert_eq!(Alerts::load(path.clone()).check(&full(), now()).len(), 1);
+        assert!(Alerts::load(path.clone()).check(&full(), now()).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn old_chats_do_not_alert() {
         let mut alerts = Alerts::default();
         assert!(
@@ -175,7 +237,8 @@ mod tests {
             let mut u = ProviderUsage::unknown("codex", "Codex", "");
             u.weekly = LimitWindow::Reported {
                 used_percent: used,
-                resets_at: Some(resets_at),
+                // Offsets from a reset a day from now.
+                resets_at: Some(unix_secs(now()) + 86_400 + resets_at),
             };
             u.stale = stale;
             u
@@ -199,9 +262,18 @@ mod tests {
                 .check(&snapshot(vec![usage(97.0, 1, false)], vec![]), now())
                 .is_empty()
         );
+        // A reset time that moved by a few seconds is still the same window.
+        assert!(
+            alerts
+                .check(&snapshot(vec![usage(96.0, 3, false)], vec![]), now())
+                .is_empty()
+        );
         assert_eq!(
             alerts
-                .check(&snapshot(vec![usage(91.0, 2, false)], vec![]), now())
+                .check(
+                    &snapshot(vec![usage(91.0, 1 + 7 * 86_400, false)], vec![]),
+                    now()
+                )
                 .len(),
             1
         );

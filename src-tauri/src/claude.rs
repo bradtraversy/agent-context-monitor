@@ -3,6 +3,9 @@
 //! This is ACM's only network request. The token is sent only to Anthropic and is
 //! never logged, stored, or shown. An expired login is not refreshed here, because
 //! that would mean writing Claude's credentials file.
+//!
+//! Claude Code saves the login in `.credentials.json` on Linux and Windows, and in
+//! the Keychain on macOS.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -84,8 +87,10 @@ impl ClaudeSource {
     }
 
     fn fetch(&self, now: SystemTime) -> Result<Reading, Failure> {
-        let raw =
-            std::fs::read(&self.credentials_path).map_err(|_| Failure::NoLogin(SIGN_IN_HINT))?;
+        let raw = std::fs::read(&self.credentials_path)
+            .ok()
+            .or_else(keychain_credentials)
+            .ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
         let oauth = serde_json::from_slice::<Credentials>(&raw)
             .ok()
             .and_then(|c| c.oauth)
@@ -181,6 +186,28 @@ impl ClaudeSource {
 enum Failure {
     NoLogin(&'static str),
     Request(String),
+}
+
+/// The login Claude Code keeps in the macOS Keychain, read with the system's own tool.
+#[cfg(target_os = "macos")]
+fn keychain_credentials() -> Option<Vec<u8>> {
+    let out = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_credentials() -> Option<Vec<u8>> {
+    None
 }
 
 fn window_values(w: UsageWindow) -> Option<(f64, Option<i64>)> {
