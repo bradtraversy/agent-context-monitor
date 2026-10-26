@@ -34,6 +34,11 @@ jobs:
             args: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # The Azure login for Windows signing trusts this repo's "release" environment.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     env:
       HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
       HAS_WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
@@ -95,29 +100,54 @@ jobs:
             echo "$name=${!name}" >> "$GITHUB_ENV"
           done
 
-      - name: Set up Windows signing
-        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
-          ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
-          PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
-        run: |
-          cargo install artifact-signing-cli --locked
-          cat > "$RUNNER_TEMP/sign.json" <<JSON
-          { "bundle": { "windows": {
-            "signCommand": "artifact-signing-cli -e $ENDPOINT -a $ACCOUNT -c $PROFILE %1"
-          } } }
-          JSON
-          echo "SIGN_ARGS=--config $RUNNER_TEMP/sign.json" >> "$GITHUB_ENV"
-          for name in AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID; do
-            echo "$name=${!name}" >> "$GITHUB_ENV"
-          done
-
       - name: Build installers
-        run: npx tauri build ${{ matrix.args }} $SIGN_ARGS
+        if: runner.os != 'Windows' || env.HAS_WINDOWS_SIGNING != 'true'
+        run: npx tauri build ${{ matrix.args }}
+
+      # Windows signing uses Azure Artifact Signing, logged in through GitHub
+      # (no stored password). The app is built, signed, then bundled, so the
+      # app inside the installers is signed too, then the installers are signed.
+      - name: Log in to Azure
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build the Windows app
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        run: npx tauri build --no-bundle
+
+      - name: Sign the Windows app
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: bradtraversy-signing
+          certificate-profile-name: bradtraversy-public
+          files: ${{ github.workspace }}\src-tauri\target\release\agent-context-monitor.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Bundle the Windows installers
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        run: npx tauri bundle
+
+      - name: Sign the Windows installers
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: bradtraversy-signing
+          certificate-profile-name: bradtraversy-public
+          files-folder: ${{ github.workspace }}\src-tauri\target\release\bundle
+          files-folder-filter: msi,exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       # Tauri notarizes the app inside, but the .dmg needs its own ticket
       # so macOS doesn't warn when someone opens the download.
