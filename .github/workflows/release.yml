@@ -119,6 +119,16 @@ jobs:
       - name: Build installers
         run: npx tauri build ${{ matrix.args }} $SIGN_ARGS
 
+      # Tauri notarizes the app inside, but the .dmg needs its own ticket
+      # so macOS doesn't warn when someone opens the download.
+      - name: Notarize the Mac disk image
+        if: runner.os == 'macOS' && env.HAS_APPLE_SIGNING == 'true'
+        run: |
+          dmg=$(find src-tauri/target -path '*/release/bundle/dmg/*.dmg' | head -1)
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+
       - name: Collect installers
         run: |
           mkdir -p out
