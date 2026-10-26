@@ -47,6 +47,11 @@ git push origin v0.1.0
 
 The Installers workflow builds on all three OSes and creates a draft release with the files attached. Check it over and publish it on GitHub.
 
+Signing turns on once these repository secrets are set (Settings, Secrets and variables, Actions). Without them the builds still work, unsigned.
+
+- macOS: `APPLE_CERTIFICATE` (base64 Developer ID Application `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and for notarizing `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password), `APPLE_TEAM_ID`
+- Windows (Azure Artifact Signing): `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE`
+
 ## Develop
 
 Requires Rust, Node, and the [Tauri prerequisites](https://tauri.app/start/prerequisites/).
