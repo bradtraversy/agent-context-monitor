@@ -34,6 +34,9 @@ jobs:
             args: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      HAS_WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
     defaults:
       run:
         shell: bash
@@ -75,8 +78,46 @@ jobs:
 
       - run: npm ci
 
+      # Signing only happens once the secrets are added in the repo settings.
+      # Without them the Mac app is ad-hoc signed and Windows is unsigned.
+      - name: Set up Mac signing
+        if: runner.os == 'macOS' && env.HAS_APPLE_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            echo "$name=${!name}" >> "$GITHUB_ENV"
+          done
+
+      - name: Set up Windows signing
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGNING == 'true'
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+        run: |
+          cargo install artifact-signing-cli --locked
+          cat > "$RUNNER_TEMP/sign.json" <<JSON
+          { "bundle": { "windows": {
+            "signCommand": "artifact-signing-cli -e $ENDPOINT -a $ACCOUNT -c $PROFILE %1"
+          } } }
+          JSON
+          echo "SIGN_ARGS=--config $RUNNER_TEMP/sign.json" >> "$GITHUB_ENV"
+          for name in AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID; do
+            echo "$name=${!name}" >> "$GITHUB_ENV"
+          done
+
       - name: Build installers
-        run: npx tauri build ${{ matrix.args }}
+        run: npx tauri build ${{ matrix.args }} $SIGN_ARGS
 
       - name: Collect installers
         run: |
