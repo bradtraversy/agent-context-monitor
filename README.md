@@ -26,14 +26,13 @@ The tray dot is grey with no data, green when fine, amber at 70% used, and red a
 3. Click a chat to open its folder or copy its resume command
 4. More providers, such as Gemini CLI, Cursor, and Copilot
 5. A keyboard shortcut to open the window
-6. Signed installers, so macOS and Windows don't warn on first open
 
 ## Install
 
 Download the installer for your system from the latest release:
 
-- macOS: the `.dmg` (works on Apple Silicon and Intel). The app isn't signed yet, so the first time, right-click it in Applications and choose Open, then Open again. On newer macOS versions you may need to allow it under System Settings, Privacy & Security.
-- Windows: the `-setup.exe` or the `.msi`. The installer isn't signed yet, so Windows may show "Windows protected your PC". Click More info, then Run anyway.
+- macOS: the `.dmg` (works on Apple Silicon and Intel). It's signed and notarized by Apple.
+- Windows: the `-setup.exe` or the `.msi`. Both are signed. While the certificate is new, Windows may still show "Windows protected your PC" for a while. Click More info, then Run anyway.
 - Linux: the `.deb` (Ubuntu, Debian), the `.rpm` (Fedora), or the `.AppImage` (any distro, make it executable and run it).
 
 ## Release
