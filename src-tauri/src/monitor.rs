@@ -30,6 +30,13 @@ pub struct HistoryFile(pub PathBuf);
 pub fn start(app: AppHandle) {
     let home = std::env::home_dir().unwrap_or_default();
     let claude_home = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+    // The Claude desktop app's record of its Code chats, in its own config folder.
+    let desktop_sessions = app
+        .path()
+        .config_dir()
+        .unwrap_or_else(|_| home.join(".config"))
+        .join("Claude")
+        .join("claude-code-sessions");
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
     let data_dir = app
         .path()
@@ -84,7 +91,7 @@ pub fn start(app: AppHandle) {
     thread::spawn(move || {
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
-        let mut claude_sessions = ClaudeSessions::new(claude_home);
+        let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
             let now = SystemTime::now();

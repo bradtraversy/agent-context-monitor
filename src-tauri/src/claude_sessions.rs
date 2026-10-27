@@ -13,6 +13,8 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
+use crate::claude_desktop::DesktopChats;
+
 #[cfg(test)]
 use crate::jsonl::consume_lines;
 use crate::jsonl::{contains, project_label, read_lines_from, rescan_due};
@@ -122,11 +124,14 @@ pub struct ClaudeSessions {
     /// Recent closed chats from the last folder search.
     recent: Vec<(String, PathBuf)>,
     last_scan: Option<SystemTime>,
+    desktop: DesktopChats,
 }
 
 impl ClaudeSessions {
-    pub fn new(claude_home: PathBuf) -> Self {
+    /// `desktop_sessions` is the desktop app's `claude-code-sessions` folder.
+    pub fn new(claude_home: PathBuf, desktop_sessions: PathBuf) -> Self {
         ClaudeSessions {
+            desktop: DesktopChats::new(desktop_sessions),
             registry_dir: claude_home.join("sessions"),
             projects_dir: claude_home.join("projects"),
             transcripts: HashMap::new(),
@@ -142,7 +147,9 @@ impl ClaudeSessions {
             self.last_scan = Some(now);
             self.recent = recent_transcripts(&self.projects_dir, now);
         }
-        let live = live_sessions(&self.registry_dir, now);
+        let hidden = self.desktop.hidden_sessions();
+        let mut live = live_sessions(&self.registry_dir, now);
+        live.retain(|e| !hidden.contains(&e.session_id));
         let mut transcripts = HashMap::with_capacity(live.len());
         let mut chats = Vec::with_capacity(live.len());
         let live_ids: Vec<String> = live.iter().map(|e| e.session_id.clone()).collect();
@@ -189,7 +196,7 @@ impl ClaudeSessions {
             transcripts.insert(entry.session_id, transcript);
         }
         for (id, path) in &self.recent {
-            if live_ids.contains(id) {
+            if live_ids.contains(id) || hidden.contains(id) {
                 continue;
             }
             let id = id.clone();
@@ -211,33 +218,8 @@ impl ClaudeSessions {
             transcripts.insert(id, transcript);
         }
         self.transcripts = transcripts;
-        drop_superseded(&mut chats);
         chats
     }
-}
-
-/// The desktop app starts a new session, with its own transcript, when a chat is
-/// reopened, so one chat can leave several transcripts with the same title and folder.
-/// Only the open session, or else the newest copy, is kept. Open sessions always stay.
-fn drop_superseded(chats: &mut Vec<ChatContext>) {
-    let key = |c: &ChatContext| c.title.clone().zip(c.cwd.clone());
-    let keep: Vec<bool> = chats
-        .iter()
-        .enumerate()
-        .map(|(i, chat)| {
-            let Some(k) = key(chat) else { return true };
-            chat.activity.is_some()
-                || !chats.iter().enumerate().any(|(j, other)| {
-                    j != i
-                        && key(other).as_ref() == Some(&k)
-                        && (other.activity.is_some()
-                            || other.last_activity > chat.last_activity
-                            || (other.last_activity == chat.last_activity && j < i))
-                })
-        })
-        .collect();
-    let mut keep = keep.into_iter();
-    chats.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// Top-level transcripts written within the recent window, keyed by session id.
@@ -571,44 +553,6 @@ mod tests {
         let tomorrow = now + std::time::Duration::from_secs(RECENT_CHAT_SECS as u64 + 60);
         assert!(recent_transcripts(&dir, tomorrow).is_empty());
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn chat(id: &str, title: &str, cwd: &str, last: i64, live: bool) -> ChatContext {
-        ChatContext {
-            provider: PROVIDER,
-            id: id.into(),
-            title: Some(title.into()),
-            project: None,
-            cwd: Some(cwd.into()),
-            model: None,
-            context: None,
-            last_activity: last,
-            subagents: 0,
-            activity: live.then_some(Activity::Idle),
-            surface: None,
-        }
-    }
-
-    #[test]
-    fn reopened_chats_show_only_the_current_session() {
-        let mut chats = vec![
-            chat("live", "Sheetbug", "/app", 100, true),
-            chat("old", "Sheetbug", "/app", 90, false),
-            chat("older", "Sheetbug", "/app", 50, false),
-            chat("other-folder", "Sheetbug", "/elsewhere", 80, false),
-            chat("closed-new", "Docs", "/app", 70, false),
-            chat("closed-old", "Docs", "/app", 60, false),
-        ];
-        drop_superseded(&mut chats);
-        let ids: Vec<&str> = chats.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["live", "other-folder", "closed-new"]);
-
-        let mut both_open = vec![
-            chat("a", "Same", "/app", 10, true),
-            chat("b", "Same", "/app", 20, true),
-        ];
-        drop_superseded(&mut both_open);
-        assert_eq!(both_open.len(), 2);
     }
 
     #[test]
