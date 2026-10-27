@@ -184,10 +184,13 @@ function chatRow(c: ChatContext): string {
   if (m && m.used_percent !== null && m.context_window !== null) {
     const level = levelFor(m.used_percent);
     const left = Math.max(0, 100 - m.used_percent);
-    const warn = LEVEL_TEXT[level] ? ` <strong class="tag">${LEVEL_TEXT[level]}</strong>` : "";
+    const over = m.used_tokens - m.context_window;
+    const tag = over > 0 ? (m.limited ? "Over your limit" : "Over the window") : LEVEL_TEXT[level];
+    const warn = tag ? ` <strong class="tag">${tag}</strong>` : "";
+    const headline = over > 0 ? `${over.toLocaleString()} tokens over` : `${left.toFixed(0)}% left`;
     const estimated = m.limited ? " (your limit)" : m.confidence === "estimated" ? " (estimated)" : "";
     gauge = `<div class="limit-head"><span>Context</span>
-        <span><b>${left.toFixed(0)}% left</b>${warn}</span></div>
+        <span><b>${headline}</b>${warn}</span></div>
       ${bar(m.used_percent, level)}
       <div class="sub">${m.used_tokens.toLocaleString()} of ${m.context_window.toLocaleString()} tokens${estimated}</div>`;
   } else if (m) {
