@@ -210,7 +210,8 @@ function chatRow(c: ChatContext): string {
 }
 
 function render() {
-  if (!snapshot) return;
+  // The first check takes a few seconds, and until then the page keeps its loading spinners.
+  if (!snapshot?.usage.length) return;
   usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
   if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
