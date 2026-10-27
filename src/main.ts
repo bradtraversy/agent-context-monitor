@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 type Level = "unknown" | "ok" | "warning" | "critical";
 
@@ -81,6 +82,9 @@ let range: Range = localStorage.getItem("historyRange") === "weekly" ? "weekly" 
 let history: ProviderHistory[] = [];
 // Widening the window shows every panel at once, with longer history.
 const wide = matchMedia("(min-width: 760px)");
+// Side by side, a long chat list pushes the history chart out of sight, so it starts short.
+const WIDE_CHAT_LIMIT = 3;
+let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
@@ -209,9 +213,21 @@ function render() {
   if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
   const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
+  const capped = wide.matches && !showAllChats && chats.length > WIDE_CHAT_LIMIT + 1;
+  const shown = capped ? chats.slice(0, WIDE_CHAT_LIMIT) : chats;
+  const more =
+    wide.matches && chats.length > WIDE_CHAT_LIMIT + 1
+      ? `<button class="more">${capped ? `Show ${chats.length - WIDE_CHAT_LIMIT} more` : "Show fewer"}</button>`
+      : "";
   chatList.innerHTML =
-    chats.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`;
+    (shown.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`) + more;
 }
+
+chatList.addEventListener("click", (e) => {
+  if (!(e.target as HTMLElement).closest(".more")) return;
+  showAllChats = !showAllChats;
+  render();
+});
 
 function setFilter(provider: string) {
   providerFilter = provider;
@@ -358,5 +374,28 @@ invoke<Snapshot>("get_snapshot").then((s) => {
 setInterval(render, 30_000);
 // New readings arrive every few minutes at most, so a slow refresh keeps the chart current.
 setInterval(loadHistory, 60_000);
-wide.addEventListener("change", loadHistory);
+const viewToggle = document.querySelector<HTMLButtonElement>("#view-toggle")!;
+// The window widths either side of the 760px breakpoint where every panel shows at once.
+const COMPACT_WIDTH = 380;
+const WIDE_WIDTH = 860;
+
+function labelViewToggle() {
+  const label = wide.matches ? "Compact view" : "Wide view";
+  viewToggle.setAttribute("aria-label", label);
+  viewToggle.title = label;
+}
+
+viewToggle.addEventListener("click", async () => {
+  const win = getCurrentWindow();
+  if (await win.isMaximized()) await win.unmaximize();
+  const size = (await win.innerSize()).toLogical(await win.scaleFactor());
+  await win.setSize(new LogicalSize(wide.matches ? COMPACT_WIDTH : WIDE_WIDTH, size.height));
+});
+
+labelViewToggle();
+wide.addEventListener("change", () => {
+  labelViewToggle();
+  render();
+  loadHistory();
+});
 loadHistory();

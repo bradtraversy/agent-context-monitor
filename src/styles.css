@@ -51,7 +51,13 @@ header {
   z-index: 1;
 }
 
+header {
+  display: flex;
+  gap: 6px;
+}
+
 nav {
+  flex: 1;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;
@@ -70,6 +76,39 @@ nav {
   color: var(--muted);
   background: transparent;
   cursor: pointer;
+}
+
+#view-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--card);
+  cursor: pointer;
+}
+
+#view-toggle:hover {
+  color: var(--text);
+}
+
+#view-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#view-toggle svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#view-toggle .to-compact {
+  display: none;
 }
 
 .filter {
@@ -383,10 +422,55 @@ h3 {
   margin-top: 8px;
 }
 
+.more {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.more:hover {
+  color: var(--text);
+}
+
+.more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Wide windows drop the tabs and show every panel, with history across the bottom. */
 @media (min-width: 760px) {
+  /* Only the view toggle stays, tucked into the top corner. */
   header {
+    position: fixed;
+    top: 8px;
+    right: 12px;
+    padding: 0;
+    background: none;
+  }
+
+  nav {
     display: none;
+  }
+
+  #view-toggle {
+    height: 28px;
+  }
+
+  #view-toggle .to-wide {
+    display: none;
+  }
+
+  #view-toggle .to-compact {
+    display: inline;
   }
 
   main {
