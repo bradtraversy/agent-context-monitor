@@ -56,6 +56,35 @@ fn get_history(
     )
 }
 
+/// Changes only the window's width, for the button that switches between the compact and wide views.
+/// `width` is in page pixels and `page_width` is the page's current width. They can differ from
+/// window pixels, e.g. GNOME's large text setting zooms the page, so the ratio converts them.
+#[tauri::command]
+fn set_window_width(window: tauri::WebviewWindow, width: f64, page_width: f64) -> tauri::Result<()> {
+    if window.is_maximized()? {
+        window.unmaximize()?;
+    }
+    let ratio = if page_width > 0.0 { width / page_width } else { 1.0 };
+    // Tauri's window size on Linux counts the title bar and shadow but its resize doesn't, so
+    // reusing its height grows the window on every click. GTK's own size and resize agree.
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::GtkWindowExt;
+        let win = window.clone();
+        window.run_on_main_thread(move || {
+            if let Ok(gtk) = win.gtk_window() {
+                let (current, height) = gtk.size();
+                gtk.resize((current as f64 * ratio).round() as i32, height);
+            }
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let size = window.inner_size()?.to_logical::<f64>(window.scale_factor()?);
+        window.set_size(tauri::LogicalSize::new(size.width * ratio, size.height))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -72,7 +101,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_history,
-            set_context_limit
+            set_context_limit,
+            set_window_width
         ])
         .setup(|app| {
             // A menu bar app on macOS, so no Dock icon next to the tray dot.

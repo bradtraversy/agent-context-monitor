@@ -13,6 +13,7 @@ name = "agent-context-monitor"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "gtk",
  "serde",
  "serde_json",
  "tauri",
