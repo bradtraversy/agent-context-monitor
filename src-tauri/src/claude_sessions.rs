@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::claude_desktop::DesktopChats;
+use crate::claude_desktop::{DesktopChats, PLACEHOLDER_TITLE};
 
 #[cfg(test)]
 use crate::jsonl::consume_lines;
@@ -147,7 +147,8 @@ impl ClaudeSessions {
             self.last_scan = Some(now);
             self.recent = recent_transcripts(&self.projects_dir, now);
         }
-        let hidden = self.desktop.hidden_sessions();
+        let desktop = self.desktop.read();
+        let hidden = &desktop.hidden;
         let mut live = live_sessions(&self.registry_dir, now);
         live.retain(|e| !hidden.contains(&e.session_id));
         let mut transcripts = HashMap::with_capacity(live.len());
@@ -168,11 +169,16 @@ impl ClaudeSessions {
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: entry
-                    .name
-                    .clone()
-                    .filter(|n| {
-                        !n.trim().is_empty() && entry.name_source.as_deref() != Some("derived")
+                title: desktop
+                    .titles
+                    .get(&entry.session_id)
+                    .cloned()
+                    .or_else(|| {
+                        entry.name.clone().filter(|n| {
+                            !n.trim().is_empty()
+                                && n != PLACEHOLDER_TITLE
+                                && entry.name_source.as_deref() != Some("derived")
+                        })
                     })
                     .or_else(|| transcript.title()),
                 surface: entry.entrypoint.as_deref().map(surface_label),
@@ -204,7 +210,11 @@ impl ClaudeSessions {
             transcript.read_new(path);
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: transcript.title(),
+                title: desktop
+                    .titles
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| transcript.title()),
                 surface: transcript.entrypoint.as_deref().map(surface_label),
                 project: transcript.cwd.as_deref().and_then(project_label),
                 cwd: transcript.cwd.clone(),

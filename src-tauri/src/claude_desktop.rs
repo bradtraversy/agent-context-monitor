@@ -2,7 +2,8 @@
 //!
 //! The desktop app starts a new Claude Code session each time a chat is reopened and
 //! keeps the earlier session ids in `priorCliSessionIds`. It also marks archived chats.
-//! Those sessions are hidden so a chat shows once, with its current context.
+//! Those sessions are hidden so a chat shows once, with its current context. The
+//! title shown in the app's sidebar names chats Claude Code itself left untitled.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,12 +20,23 @@ struct Record {
     prior_cli_session_ids: Vec<String>,
     #[serde(rename = "isArchived", default)]
     is_archived: bool,
+    title: Option<String>,
 }
 
 struct Entry {
     modified: Option<SystemTime>,
     /// Session ids this chat hides: earlier ones, plus the current one when archived.
     hidden: Vec<String>,
+    /// The current session id and the chat's title.
+    title: Option<(String, String)>,
+}
+
+#[derive(Default)]
+pub struct Desktop {
+    /// Claude Code session ids that are replaced or archived.
+    pub hidden: HashSet<String>,
+    /// Chat titles by current Claude Code session id.
+    pub titles: HashMap<String, String>,
 }
 
 pub struct DesktopChats {
@@ -41,39 +53,58 @@ impl DesktopChats {
         }
     }
 
-    /// Claude Code session ids that are replaced or archived. Records are only parsed
-    /// again when they change, since the folder holds every chat ever.
-    pub fn hidden_sessions(&mut self) -> HashSet<String> {
+    /// Records are only parsed again when they change, since the folder holds every
+    /// chat ever.
+    pub fn read(&mut self) -> Desktop {
         let mut entries = HashMap::with_capacity(self.entries.len());
         for path in records(&self.dir) {
             let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
             let entry = match self.entries.remove(&path) {
                 Some(entry) if entry.modified.is_some() && entry.modified == modified => entry,
-                _ => Entry {
-                    modified,
-                    hidden: fs::read(&path)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-                        .map(hidden_by)
-                        .unwrap_or_default(),
-                },
+                _ => fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+                    .map(|record| entry_from(record, modified))
+                    .unwrap_or(Entry {
+                        modified,
+                        hidden: Vec::new(),
+                        title: None,
+                    }),
             };
             entries.insert(path, entry);
         }
         self.entries = entries;
-        self.entries
-            .values()
-            .flat_map(|e| e.hidden.iter().cloned())
-            .collect()
+        Desktop {
+            hidden: self
+                .entries
+                .values()
+                .flat_map(|e| e.hidden.iter().cloned())
+                .collect(),
+            titles: self
+                .entries
+                .values()
+                .filter_map(|e| e.title.clone())
+                .collect(),
+        }
     }
 }
 
-fn hidden_by(record: Record) -> Vec<String> {
+/// Chats started from a project all get this placeholder, so it names nothing.
+pub const PLACEHOLDER_TITLE: &str = "Remote Control session (from a project)";
+
+fn entry_from(record: Record, modified: Option<SystemTime>) -> Entry {
     let mut hidden = record.prior_cli_session_ids;
     if record.is_archived {
-        hidden.extend(record.cli_session_id);
+        hidden.extend(record.cli_session_id.clone());
     }
-    hidden
+    let title = record
+        .title
+        .filter(|t| !t.trim().is_empty() && t != PLACEHOLDER_TITLE);
+    Entry {
+        modified,
+        hidden,
+        title: record.cli_session_id.zip(title),
+    }
 }
 
 /// `<account>/<organization>/local_<id>.json` under the sessions folder.
@@ -120,14 +151,21 @@ mod tests {
             r#"{"cliSessionId":"gone","priorCliSessionIds":["gone-old"],"isArchived":true}"#,
         )
         .unwrap();
-        fs::write(org.join("deleted_c"), "x").unwrap();
+        fs::write(
+            org.join("local_c.json"),
+            r#"{"cliSessionId":"thread","title":"Remote Control session (from a project)"}"#,
+        )
+        .unwrap();
+        fs::write(org.join("deleted_d"), "x").unwrap();
         let mut desktop = DesktopChats::new(dir.clone());
-        let hidden = desktop.hidden_sessions();
-        let mut hidden: Vec<&str> = hidden.iter().map(String::as_str).collect();
+        let read = desktop.read();
+        let mut hidden: Vec<&str> = read.hidden.iter().map(String::as_str).collect();
         hidden.sort();
         assert_eq!(hidden, ["gone", "gone-old", "old", "older"]);
-        assert!(desktop.hidden_sessions().contains("old"));
+        assert_eq!(read.titles.get("now").map(String::as_str), Some("Sheetbug"));
+        assert!(!read.titles.contains_key("thread"));
+        assert!(desktop.read().hidden.contains("old"));
         fs::remove_dir_all(&dir).unwrap();
-        assert!(desktop.hidden_sessions().is_empty());
+        assert!(desktop.read().hidden.is_empty());
     }
 }
