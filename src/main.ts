@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 type Level = "unknown" | "ok" | "warning" | "critical";
 
@@ -373,7 +374,27 @@ invoke<Snapshot>("get_snapshot").then((s) => {
 setInterval(render, 30_000);
 // New readings arrive every few minutes at most, so a slow refresh keeps the chart current.
 setInterval(loadHistory, 60_000);
+const viewToggle = document.querySelector<HTMLButtonElement>("#view-toggle")!;
+// The window widths either side of the 760px breakpoint where every panel shows at once.
+const COMPACT_WIDTH = 380;
+const WIDE_WIDTH = 860;
+
+function labelViewToggle() {
+  const label = wide.matches ? "Compact view" : "Wide view";
+  viewToggle.setAttribute("aria-label", label);
+  viewToggle.title = label;
+}
+
+viewToggle.addEventListener("click", async () => {
+  const win = getCurrentWindow();
+  if (await win.isMaximized()) await win.unmaximize();
+  const size = (await win.innerSize()).toLogical(await win.scaleFactor());
+  await win.setSize(new LogicalSize(wide.matches ? COMPACT_WIDTH : WIDE_WIDTH, size.height));
+});
+
+labelViewToggle();
 wide.addEventListener("change", () => {
+  labelViewToggle();
   render();
   loadHistory();
 });
