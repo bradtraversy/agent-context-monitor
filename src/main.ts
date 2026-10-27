@@ -394,8 +394,16 @@ viewToggle.addEventListener("click", () => {
     localStorage.setItem("compactWidth", String(innerWidth));
     width = WIDE_WIDTH;
   }
-  invoke("set_window_width", { width, pageWidth: innerWidth });
+  invoke("resize_window", { width, pageWidth: innerWidth, pageHeight: innerHeight });
 });
+
+// Tall enough for three usage cards, since more providers are coming. Set here rather than only in
+// the window config because large text settings zoom the page, which shrinks it in the window.
+const openHeight = Math.min(720, screen.availHeight - 60);
+if (innerHeight < openHeight && !sessionStorage.getItem("sized")) {
+  sessionStorage.setItem("sized", "1");
+  invoke("resize_window", { height: openHeight, pageWidth: innerWidth, pageHeight: innerHeight });
+}
 
 labelViewToggle();
 wide.addEventListener("change", () => {
