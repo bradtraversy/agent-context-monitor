@@ -126,6 +126,7 @@ jobs:
           echo "SIGN_ARGS=--config $RUNNER_TEMP/sign.json" >> "$GITHUB_ENV"
 
       - name: Build installers
+        timeout-minutes: 30
         run: npx tauri build ${{ matrix.args }} $SIGN_ARGS
 
       - name: Check the Windows signatures
