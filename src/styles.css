@@ -383,6 +383,30 @@ h3 {
   margin-top: 8px;
 }
 
+.more {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.more:hover {
+  color: var(--text);
+}
+
+.more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Wide windows drop the tabs and show every panel, with history across the bottom. */
 @media (min-width: 760px) {
   header {
