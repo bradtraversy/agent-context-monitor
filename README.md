@@ -1,23 +1,52 @@
 # Agent Context Monitor
 
-A small tray app that shows how much Claude Code and Codex usage you have left this session and this week, and how much context each recent chat has left. Everything runs locally and read-only.
+A small desktop app that lives in your tray and shows how much Claude Code and Codex usage you have left, plus how full the context is in each of your recent chats. It reads what's already on your computer and never stores your messages.
 
-## What it reads
+<p align="center">
+  <img src="docs/screenshots/usage.png" alt="Usage view showing Claude and Codex session and weekly limits" width="300">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/context.png" alt="Context view showing how full each recent chat is" width="300">
+</p>
 
-- Codex: when no Codex reading is newer than four minutes, the app asks the installed Codex for live usage (`codex app-server`, read-only `account/rateLimits/read`), the same source as its /status screen. Codex uses its own login. The app looks for Codex on the PATH, in the usual install folders (Homebrew, npm, nvm, `~/.local/bin`), and in the Codex desktop app. The newest `token_count` record in `~/.codex/sessions` (or `$CODEX_HOME/sessions`) is used too, and whichever reading is newer wins. Windows are identified by length, so a plan with only a weekly limit shows "Not reported" for the session limit. Chat titles come from `session_index.jsonl`.
-- Claude: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), or in the Keychain on macOS, used for one read-only usage request to Anthropic every four minutes. Apart from Codex's own usage check, this is the app's only network call. The token is never logged or stored. If the login is missing or expired, Claude usage shows as unknown.
+## Install
 
-- Claude chats: Claude Code's live session registry in `~/.claude/sessions` lists open chats with their name and busy or idle state. Closed chats come from transcripts in `~/.claude/projects` written in the last 24 hours, titled from the name Claude saved. The Claude desktop app starts a new session each time a chat is reopened. Its own list of chats (`claude-code-sessions` in its config folder) is read so those earlier sessions, and chats you archived there, are hidden, and each chat is titled as it is in the app's sidebar. Context tokens come from the last reply in each transcript. Transcripts do not record the context window, so it is estimated from the model name and marked estimated: 1M when Claude Code marks the model with `[1m]` or the chat has already gone past 200k, otherwise 200k. Models that aren't Claude show a token count only.
+Download the installer for your system from the [latest release](https://github.com/bradtraversy/agent-context-monitor/releases/latest).
 
-The Context tab shows Claude and Codex chats used in the last 24 hours, most recent first. A chat drops off after a quiet day and comes back as soon as it is used again. Only chats used in the last 30 minutes color the tray. The Context limit picker measures every chat against your own limit, such as 300K, instead of the model's window when it is smaller. It is saved in the app's config folder.
+- macOS: the `.dmg`. Works on Apple Silicon and Intel, macOS 11 or later.
+- Windows: the `-setup.exe` or the `.msi`. If Windows shows "Windows protected your PC", click More info, then Run anyway.
+- Linux: the `.deb` (Ubuntu, Debian), the `.rpm` (Fedora), or the `.AppImage` (any distro, make it executable and run it).
 
-Only usage and session metadata are kept. For the History tab, each fresh usage reading that differs from the last one (time, session and weekly percent, weekly reset time) is appended to `usage-history.jsonl` in the app's data folder, and readings older than 120 days are dropped at startup. Daily bars show how much of the weekly limit was used that day; weekly bars show the highest weekly usage reached before each reset.
+You need Claude Code, Codex, or both installed and logged in. The app picks them up on its own, there's nothing to set up.
 
-No usage reading should be more than five minutes old. Older ones are greyed out and labeled as possibly out of date, and they don't color the tray. A new provider must refresh usage from a live source within that limit, using as little as it can, with local files only as a fallback, so resets show up even when the agent hasn't been used. Message content is never stored or displayed.
+## What it shows
 
-## Tray
+- Usage: how much of your current session and weekly limit is left for Claude and Codex, and when each one resets.
+- Context: every Claude and Codex chat you used in the last 24 hours, with how much of its context window is left. Filter by provider, or set your own context limit (say 300K) to measure chats against.
+- History: daily and weekly bars of how much of your weekly limit you used.
 
-The tray dot is grey with no data, green when fine, amber at 70% used, and red at 90% used, across all limits and chats. A desktop alert pops up once when a chat used in the last 30 minutes reaches 90% of its context (or your limit), and once per window when session or weekly usage passes 90%. Sent alerts are remembered, so restarting the app doesn't repeat them. Closing the window keeps the app in the tray, and opening the app again just brings the window back. Turn on Start at login from the tray menu. On Linux, open the window or quit from the tray menu. GNOME needs the AppIndicator extension, which Ubuntu ships by default.
+Widen the window, or click the arrow button in the top corner, to see everything side by side.
+
+![Wide view with usage, context, and history side by side](docs/screenshots/wide.png)
+
+The tray dot turns amber at 70% used and red at 90%, and you get a desktop alert when a limit or an active chat is close to running out. Closing the window keeps the app in the tray. Turn on Start at login from the tray menu.
+
+On Linux, use the tray menu to open the window or quit. GNOME needs the AppIndicator extension, which Ubuntu ships with.
+
+## Privacy
+
+Everything runs on your computer, read-only. The app reads chat metadata (title, model, token counts) from Claude Code and Codex's local files, never message content. The only network calls are the usage checks: one request to Anthropic every few minutes using the login Claude Code already saved, and Codex's own usage check through the installed Codex. Your login token is never logged or stored by the app. For the History tab it keeps a small log of usage percentages in its data folder, trimmed to 120 days.
+
+<details>
+<summary>Where the data comes from</summary>
+
+- Claude usage: the login Claude Code saves in `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), or the Keychain on macOS, used for one read-only usage request every four minutes. If the login is missing or expired, Claude usage shows as unknown.
+- Codex usage: the installed Codex's read-only rate limit check (`codex app-server`), the same source as its /status screen, plus the newest `token_count` record in `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Whichever is newer wins. The app finds Codex on the PATH, in the usual install folders, and in the Codex desktop app.
+- Claude chats: open chats from `~/.claude/sessions`, recent ones from transcripts in `~/.claude/projects`, and the Claude desktop app's own chat list so reopened and archived chats are handled the way the app shows them. Claude transcripts don't record the context window, so it's estimated from the model (1M for `[1m]` models or chats already past 200K, otherwise 200K) and marked estimated.
+- Codex chats: `~/.codex/sessions`, titled from `session_index.jsonl`.
+
+Readings older than five minutes are greyed out and marked as possibly out of date, and they don't color the tray.
+
+</details>
 
 ## Roadmap
 
@@ -26,30 +55,6 @@ The tray dot is grey with no data, green when fine, amber at 70% used, and red a
 3. Click a chat to open its folder or copy its resume command
 4. More providers, such as Gemini CLI, Cursor, and Copilot
 5. A keyboard shortcut to open the window
-
-## Install
-
-Download the installer for your system from the latest release:
-
-- macOS: the `.dmg` (works on Apple Silicon and Intel). It's signed and notarized by Apple.
-- Windows: the `-setup.exe` or the `.msi`. Both are signed. While the certificate is new, Windows may still show "Windows protected your PC" for a while. Click More info, then Run anyway.
-- Linux: the `.deb` (Ubuntu, Debian), the `.rpm` (Fedora), or the `.AppImage` (any distro, make it executable and run it).
-
-## Release
-
-Bump `version` in `src-tauri/tauri.conf.json`, then push a matching tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The Installers workflow builds on all three OSes and creates a draft release with the files attached. Check it over and publish it on GitHub.
-
-Signing turns on once these repository secrets are set (Settings, Secrets and variables, Actions). Without them the builds still work, unsigned.
-
-- macOS: `APPLE_CERTIFICATE` (base64 Developer ID Application `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and for notarizing `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password), `APPLE_TEAM_ID`
-- Windows (Azure Artifact Signing, account `bradtraversy-signing`, profile `bradtraversy-public`): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. There's no password: the Azure app trusts this repo's `release` environment through a federated credential.
 
 ## Develop
 
@@ -60,9 +65,7 @@ npm install
 npm run tauri dev
 ```
 
-Tests: `cargo test --manifest-path src-tauri/Cargo.toml`
-
-Build: `npm run tauri build`
+Run the tests with `cargo test --manifest-path src-tauri/Cargo.toml` and build installers with `npm run tauri build`. Release steps are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
