@@ -1,8 +1,8 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -20,6 +20,10 @@ use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const LIVE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// How long the window keeps its loading spinner waiting for the first live checks, so it
+/// opens on fresh numbers instead of old ones from session files.
+const FIRST_CHECK_WAIT: Duration = Duration::from_secs(15);
+const LIVE_SOURCES: usize = 2;
 
 #[derive(Default)]
 pub struct SharedSnapshot(pub Mutex<Snapshot>);
@@ -47,12 +51,16 @@ pub fn start(app: AppHandle) {
 
     // Live usage checks are slow, so they run apart from the file loop and only when
     // the newest reading is about to go stale.
+    let started = Instant::now();
+    let first_checks_done = Arc::new(AtomicUsize::new(0));
     let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home.clone())));
     {
         let claude = Arc::clone(&claude);
+        let first_checks_done = Arc::clone(&first_checks_done);
         thread::spawn(move || {
             let mut source = claude.lock().unwrap().clone();
             let mut last_check = i64::MIN;
+            let mut first = true;
             loop {
                 let now = SystemTime::now();
                 if unix_secs(now).saturating_sub(last_check) >= LIVE_REFRESH_AFTER_SECS {
@@ -60,6 +68,7 @@ pub fn start(app: AppHandle) {
                     source.refresh(now);
                     *claude.lock().unwrap() = source.clone();
                 }
+                mark_first_check(&mut first, &first_checks_done);
                 thread::sleep(LIVE_CHECK_INTERVAL);
             }
         });
@@ -70,8 +79,10 @@ pub fn start(app: AppHandle) {
     {
         let codex_live = Arc::clone(&codex_live);
         let newest_codex_file = Arc::clone(&newest_codex_file);
+        let first_checks_done = Arc::clone(&first_checks_done);
         thread::spawn(move || {
             let mut last_check = i64::MIN;
+            let mut first = true;
             loop {
                 let now = SystemTime::now();
                 // Codex writes fresh readings to its session files while in use, so
@@ -83,6 +94,7 @@ pub fn start(app: AppHandle) {
                         *codex_live.lock().unwrap() = Some(reading);
                     }
                 }
+                mark_first_check(&mut first, &first_checks_done);
                 thread::sleep(LIVE_CHECK_INTERVAL);
             }
         });
@@ -94,6 +106,12 @@ pub fn start(app: AppHandle) {
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
+            if first_checks_done.load(Ordering::Relaxed) < LIVE_SOURCES
+                && started.elapsed() < FIRST_CHECK_WAIT
+            {
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
             let now = SystemTime::now();
             codex.refresh(now);
             if let Some(newest) = codex.newest_file_reading() {
@@ -126,6 +144,13 @@ pub fn start(app: AppHandle) {
             thread::sleep(REFRESH_INTERVAL);
         }
     });
+}
+
+/// Counts a live source's first check, done or failed, so the window can stop waiting on it.
+fn mark_first_check(first: &mut bool, done: &AtomicUsize) {
+    if std::mem::take(first) {
+        done.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn publish(app: &AppHandle, snapshot: Snapshot) {

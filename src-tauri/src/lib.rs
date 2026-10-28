@@ -92,7 +92,9 @@ fn resize_window(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let size = window.inner_size()?.to_logical::<f64>(window.scale_factor()?);
+        let size = window
+            .inner_size()?
+            .to_logical::<f64>(window.scale_factor()?);
         window.set_size(tauri::LogicalSize::new(
             scale(width, page_width, size.width),
             scale(height, page_height, size.height),
