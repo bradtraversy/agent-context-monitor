@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 type Level = "unknown" | "ok" | "warning" | "critical";
 
@@ -211,7 +210,8 @@ function chatRow(c: ChatContext): string {
 }
 
 function render() {
-  if (!snapshot) return;
+  // The first check takes a few seconds, and until then the page keeps its loading spinners.
+  if (!snapshot?.usage.length) return;
   usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
   if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
@@ -378,7 +378,7 @@ setInterval(render, 30_000);
 // New readings arrive every few minutes at most, so a slow refresh keeps the chart current.
 setInterval(loadHistory, 60_000);
 const viewToggle = document.querySelector<HTMLButtonElement>("#view-toggle")!;
-// The window widths either side of the 760px breakpoint where every panel shows at once.
+// Page widths either side of the 760px breakpoint where every panel shows at once.
 const COMPACT_WIDTH = 380;
 const WIDE_WIDTH = 860;
 
@@ -388,12 +388,23 @@ function labelViewToggle() {
   viewToggle.title = label;
 }
 
-viewToggle.addEventListener("click", async () => {
-  const win = getCurrentWindow();
-  if (await win.isMaximized()) await win.unmaximize();
-  const size = (await win.innerSize()).toLogical(await win.scaleFactor());
-  await win.setSize(new LogicalSize(wide.matches ? COMPACT_WIDTH : WIDE_WIDTH, size.height));
+viewToggle.addEventListener("click", () => {
+  // Going back to compact restores whatever width the window had before it went wide.
+  let width = Number(localStorage.getItem("compactWidth")) || COMPACT_WIDTH;
+  if (!wide.matches) {
+    localStorage.setItem("compactWidth", String(innerWidth));
+    width = WIDE_WIDTH;
+  }
+  invoke("resize_window", { width, pageWidth: innerWidth, pageHeight: innerHeight });
 });
+
+// Tall enough for three usage cards, since more providers are coming. Set here rather than only in
+// the window config because large text settings zoom the page, which shrinks it in the window.
+const openHeight = Math.min(720, screen.availHeight - 60);
+if (innerHeight < openHeight && !sessionStorage.getItem("sized")) {
+  sessionStorage.setItem("sized", "1");
+  invoke("resize_window", { height: openHeight, pageWidth: innerWidth, pageHeight: innerHeight });
+}
 
 labelViewToggle();
 wide.addEventListener("change", () => {

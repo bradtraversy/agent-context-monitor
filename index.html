@@ -27,7 +27,9 @@
       </button>
     </header>
     <main>
-      <section role="tabpanel" id="panel-usage" data-title="Usage" aria-labelledby="tab-usage"></section>
+      <section role="tabpanel" id="panel-usage" data-title="Usage" aria-labelledby="tab-usage">
+        <div class="loading" role="status"><span class="spinner"></span>Fetching your usage</div>
+      </section>
       <section role="tabpanel" id="panel-context" data-title="Context" aria-labelledby="tab-context" hidden>
         <div class="filter" role="radiogroup" aria-label="Show chats from">
           <button role="radio" data-provider="all" aria-checked="true">All</button>
@@ -48,7 +50,9 @@
             <option value="750000">750K</option>
           </select>
         </label>
-        <div id="chat-list"></div>
+        <div id="chat-list">
+          <div class="loading" role="status"><span class="spinner"></span>Fetching your chats</div>
+        </div>
       </section>
       <section role="tabpanel" id="panel-history" data-title="History" aria-labelledby="tab-history" hidden>
         <div class="filter" role="radiogroup" aria-label="Group usage by">
