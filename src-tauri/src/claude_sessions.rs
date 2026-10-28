@@ -13,6 +13,8 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
+use crate::claude_desktop::{DesktopChats, PLACEHOLDER_TITLE};
+
 #[cfg(test)]
 use crate::jsonl::consume_lines;
 use crate::jsonl::{contains, project_label, read_lines_from, rescan_due};
@@ -122,11 +124,14 @@ pub struct ClaudeSessions {
     /// Recent closed chats from the last folder search.
     recent: Vec<(String, PathBuf)>,
     last_scan: Option<SystemTime>,
+    desktop: DesktopChats,
 }
 
 impl ClaudeSessions {
-    pub fn new(claude_home: PathBuf) -> Self {
+    /// `desktop_sessions` is the desktop app's `claude-code-sessions` folder.
+    pub fn new(claude_home: PathBuf, desktop_sessions: PathBuf) -> Self {
         ClaudeSessions {
+            desktop: DesktopChats::new(desktop_sessions),
             registry_dir: claude_home.join("sessions"),
             projects_dir: claude_home.join("projects"),
             transcripts: HashMap::new(),
@@ -142,7 +147,10 @@ impl ClaudeSessions {
             self.last_scan = Some(now);
             self.recent = recent_transcripts(&self.projects_dir, now);
         }
-        let live = live_sessions(&self.registry_dir, now);
+        let desktop = self.desktop.read();
+        let hidden = &desktop.hidden;
+        let mut live = live_sessions(&self.registry_dir, now);
+        live.retain(|e| !hidden.contains(&e.session_id));
         let mut transcripts = HashMap::with_capacity(live.len());
         let mut chats = Vec::with_capacity(live.len());
         let live_ids: Vec<String> = live.iter().map(|e| e.session_id.clone()).collect();
@@ -161,11 +169,16 @@ impl ClaudeSessions {
             }
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: entry
-                    .name
-                    .clone()
-                    .filter(|n| {
-                        !n.trim().is_empty() && entry.name_source.as_deref() != Some("derived")
+                title: desktop
+                    .titles
+                    .get(&entry.session_id)
+                    .cloned()
+                    .or_else(|| {
+                        entry.name.clone().filter(|n| {
+                            !n.trim().is_empty()
+                                && n != PLACEHOLDER_TITLE
+                                && entry.name_source.as_deref() != Some("derived")
+                        })
                     })
                     .or_else(|| transcript.title()),
                 surface: entry.entrypoint.as_deref().map(surface_label),
@@ -189,7 +202,7 @@ impl ClaudeSessions {
             transcripts.insert(entry.session_id, transcript);
         }
         for (id, path) in &self.recent {
-            if live_ids.contains(id) {
+            if live_ids.contains(id) || hidden.contains(id) {
                 continue;
             }
             let id = id.clone();
@@ -197,7 +210,11 @@ impl ClaudeSessions {
             transcript.read_new(path);
             chats.push(ChatContext {
                 provider: PROVIDER,
-                title: transcript.title(),
+                title: desktop
+                    .titles
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| transcript.title()),
                 surface: transcript.entrypoint.as_deref().map(surface_label),
                 project: transcript.cwd.as_deref().and_then(project_label),
                 cwd: transcript.cwd.clone(),

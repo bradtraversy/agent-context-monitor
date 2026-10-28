@@ -1,5 +1,6 @@
 mod alerts;
 mod claude;
+mod claude_desktop;
 mod claude_sessions;
 mod codex;
 mod codex_live;
