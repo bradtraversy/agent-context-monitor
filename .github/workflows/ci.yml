@@ -18,17 +18,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux
-            os: ubuntu-24.04
-            bin: agent-context-monitor
-          - name: macOS
-            os: macos-latest
-            bin: agent-context-monitor
-          - name: Windows
-            os: windows-latest
-            bin: agent-context-monitor.exe
-    runs-on: ${{ matrix.os }}
+        # macOS and Windows minutes cost far more than Linux, so only main and manual runs build them.
+        name: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '["Linux","macOS","Windows"]' || '["Linux"]') }}
+    runs-on: ${{ fromJSON('{"Linux":"ubuntu-24.04","macOS":"macos-latest","Windows":"windows-latest"}')[matrix.name] }}
     timeout-minutes: 30
     defaults:
       run:
@@ -67,7 +59,7 @@ jobs:
 
       - name: Launch smoke check
         env:
-          BIN: src-tauri/target/debug/${{ matrix.bin }}
+          BIN: src-tauri/target/debug/agent-context-monitor${{ runner.os == 'Windows' && '.exe' || '' }}
           SHOT: screenshot-${{ matrix.name }}.png
         run: |
           case "$RUNNER_OS" in
