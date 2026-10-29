@@ -5,22 +5,24 @@
 //!
 //! Claude Code saves the login in `.credentials.json` on Linux and Windows, and in
 //! the Keychain on macOS. Its access token lasts a few hours and Claude Code renews
-//! it only while it runs, so when the file's token is about to expire ACM renews it
-//! the way Claude Code does: under Claude Code's own refresh lock, writing the new
-//! tokens back so both keep sharing one login. A Keychain login is not renewed.
+//! it only while it runs, so when the token is about to expire ACM renews it the way
+//! Claude Code does: under Claude Code's own refresh lock, writing the new tokens
+//! back to the same file or Keychain item so both keep sharing one login.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use crate::model::{LimitWindow, ProviderUsage, UsageStatus, unix_secs};
+use crate::model::{LimitWindow, ProviderUsage, UsageAction, UsageStatus, unix_secs};
+use crate::programs;
 
 const PROVIDER: &str = "claude";
 const NAME: &str = "Claude";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const SIGN_IN_HINT: &str = "Sign in to Claude Code in a terminal to see Claude usage.";
-const EXPIRED_HINT: &str = "Claude's saved login expired. Open Claude Code to refresh it.";
+const SIGN_IN_HINT: &str = "Sign in to Claude Code to see Claude usage.";
+const EXPIRED_HINT: &str = "Claude's login expired. Sign in again to see usage.";
+const INSTALL_HINT: &str = "Install Claude Code to see Claude usage.";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 /// Renew this long before expiry, as Claude Code does.
@@ -28,6 +30,14 @@ const RENEW_AHEAD_MS: i64 = 5 * 60 * 1000;
 /// Claude Code treats a refresh lock older than this as left behind by a crash.
 const STALE_LOCK: Duration = Duration::from_secs(60);
 const OAUTH_KEY: &str = "claudeAiOauth";
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Where Claude Code keeps the login, which is also where renewed tokens go.
+#[derive(Clone, Copy)]
+enum Store {
+    File,
+    Keychain,
+}
 
 #[derive(Deserialize)]
 struct Credentials {
@@ -93,6 +103,10 @@ pub struct ClaudeSource {
     credentials_path: PathBuf,
     last_good: Option<Reading>,
     problem: Option<String>,
+    /// The saved login, by fingerprint, when it last failed to give a reading, so a new
+    /// sign-in can be picked up right away.
+    failed_login: Option<u64>,
+    can_sign_in: bool,
 }
 
 impl ClaudeSource {
@@ -102,7 +116,22 @@ impl ClaudeSource {
             claude_home,
             last_good: None,
             problem: None,
+            failed_login: None,
+            can_sign_in: false,
         }
+    }
+
+    /// Whether the saved login changed since it last failed, e.g. after signing in.
+    pub fn login_changed(&self) -> bool {
+        self.failed_login
+            .is_some_and(|failed| failed != self.login_fingerprint())
+    }
+
+    fn login_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.read_login().map(|(raw, _)| raw).hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn refresh(&mut self, now: SystemTime) {
@@ -110,26 +139,50 @@ impl ClaudeSource {
             Ok(reading) => {
                 self.last_good = Some(reading);
                 self.problem = None;
+                self.failed_login = None;
+                self.can_sign_in = false;
             }
             Err(Failure::NoLogin(hint)) => {
                 // A missing or expired login must not leave an old number on screen.
                 self.last_good = None;
-                self.problem = Some(hint.to_string());
+                self.can_sign_in = find_claude().is_some();
+                self.problem = Some(no_login_hint(hint, self.can_sign_in).to_string());
+                self.failed_login = Some(self.login_fingerprint());
             }
-            Err(Failure::Request(msg)) => self.problem = Some(msg),
+            Err(Failure::Request(msg)) => {
+                self.problem = Some(msg);
+                self.failed_login = None;
+            }
+        }
+    }
+
+    fn read_login(&self) -> Option<(Vec<u8>, Store)> {
+        match std::fs::read(&self.credentials_path) {
+            Ok(raw) => Some((raw, Store::File)),
+            Err(_) => keychain_credentials().map(|raw| (raw, Store::Keychain)),
+        }
+    }
+
+    fn read_store(&self, store: Store) -> Option<Vec<u8>> {
+        match store {
+            Store::File => std::fs::read(&self.credentials_path).ok(),
+            Store::Keychain => keychain_credentials(),
+        }
+    }
+
+    fn write_store(&self, store: Store, contents: &[u8]) -> bool {
+        match store {
+            Store::File => write_private(&self.credentials_path, contents).is_ok(),
+            Store::Keychain => save_keychain_credentials(contents),
         }
     }
 
     fn fetch(&self, now: SystemTime) -> Result<Reading, Failure> {
-        let file = std::fs::read(&self.credentials_path).ok();
-        let in_file = file.is_some();
-        let raw = file
-            .or_else(keychain_credentials)
-            .ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
+        let (raw, store) = self.read_login().ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
         let mut oauth = parse_oauth(&raw).ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
         let now_ms = unix_secs(now) * 1000;
-        if in_file && oauth.expires_within(now_ms, RENEW_AHEAD_MS) {
-            match self.renew_login(now_ms) {
+        if oauth.expires_within(now_ms, RENEW_AHEAD_MS) {
+            match self.renew_login(store, now_ms) {
                 Ok(renewed) => oauth = renewed,
                 // A token with a few minutes left still works if renewing failed.
                 Err(e) if oauth.expires_within(now_ms, 0) => return Err(e),
@@ -180,15 +233,16 @@ impl ClaudeSource {
     }
 
     /// Renews the saved login under Claude Code's refresh lock and writes the new
-    /// tokens back to its credentials file.
-    fn renew_login(&self, now_ms: i64) -> Result<OAuth, Failure> {
+    /// tokens back where Claude Code keeps them.
+    fn renew_login(&self, store: Store, now_ms: i64) -> Result<OAuth, Failure> {
         let busy =
             || Failure::Request("Claude is renewing its login. Checking again shortly.".into());
         let _lock = RefreshLock::acquire(&self.claude_home).ok_or_else(busy)?;
 
         // Claude Code may have renewed it while ACM waited for the lock.
-        let raw =
-            std::fs::read(&self.credentials_path).map_err(|_| Failure::NoLogin(SIGN_IN_HINT))?;
+        let raw = self
+            .read_store(store)
+            .ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
         let oauth = parse_oauth(&raw).ok_or(Failure::NoLogin(SIGN_IN_HINT))?;
         if !oauth.expires_within(now_ms, RENEW_AHEAD_MS) {
             return Ok(oauth);
@@ -232,20 +286,25 @@ impl ClaudeSource {
 
         let updated = apply_tokens(&raw, &tokens, now_ms)
             .ok_or_else(|| Failure::Request("Claude's saved login was not readable.".into()))?;
-        write_private(&self.credentials_path, &updated)
-            .map_err(|_| Failure::Request("Couldn't save Claude's renewed login.".into()))?;
+        if !self.write_store(store, &updated) {
+            return Err(Failure::Request(
+                "Couldn't save Claude's renewed login.".into(),
+            ));
+        }
         parse_oauth(&updated).ok_or(Failure::NoLogin(SIGN_IN_HINT))
     }
 
     pub fn usage(&self, now: SystemTime) -> ProviderUsage {
         let Some(reading) = &self.last_good else {
-            return ProviderUsage::unknown(
+            let mut usage = ProviderUsage::unknown(
                 PROVIDER,
                 NAME,
                 self.problem
                     .clone()
                     .unwrap_or_else(|| "Checking Claude usage.".into()),
             );
+            usage.action = self.can_sign_in.then_some(UsageAction::SignIn);
+            return usage;
         };
         let now = unix_secs(now);
         let to_window = |w: Option<(f64, Option<i64>)>| match w {
@@ -278,8 +337,33 @@ impl ClaudeSource {
             session,
             weekly,
             stale: false,
+            action: None,
         }
     }
+}
+
+fn find_claude() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd"]
+    } else {
+        &["claude"]
+    };
+    let home = std::env::home_dir().unwrap_or_default();
+    // Older installs keep Claude Code in its own folder instead of on PATH.
+    programs::find(names)
+        .or_else(|| Some(home.join(".claude").join("local").join(names[0])).filter(|p| p.is_file()))
+}
+
+/// Opens a terminal running Claude Code's own sign-in.
+pub fn sign_in() -> Result<(), String> {
+    let claude = find_claude().ok_or_else(|| INSTALL_HINT.to_string())?;
+    programs::open_in_terminal(&claude, &["auth", "login"])
+        .map_err(|_| "Couldn't open a terminal. Run claude auth login in one to sign in.".into())
+}
+
+/// Without Claude Code there's nothing to sign in with, so say to install it instead.
+fn no_login_hint(hint: &'static str, installed: bool) -> &'static str {
+    if installed { hint } else { INSTALL_HINT }
 }
 
 enum Failure {
@@ -380,26 +464,108 @@ fn take_lock_dir(path: &Path) -> bool {
     stale && std::fs::remove_dir(path).is_ok() && std::fs::create_dir(path).is_ok()
 }
 
-/// The login Claude Code keeps in the macOS Keychain, read with the system's own tool.
+/// Runs the system's own Keychain tool, which Claude Code's item already trusts, so
+/// reading and writing it never asks for permission.
+#[cfg(target_os = "macos")]
+fn security(args: &[&str], input: Option<&str>) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/usr/bin/security")
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let out = child.wait_with_output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// The login Claude Code keeps in the macOS Keychain.
 #[cfg(target_os = "macos")]
 fn keychain_credentials() -> Option<Vec<u8>> {
-    let out = std::process::Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    out.status.success().then_some(out.stdout)
+    let mut raw = security(
+        &["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+        None,
+    )?;
+    while raw.last().is_some_and(u8::is_ascii_whitespace) {
+        raw.pop();
+    }
+    Some(raw)
+}
+
+/// Updates Claude Code's Keychain item in place, the way Claude Code writes it, and
+/// reads it back to be sure it took.
+#[cfg(target_os = "macos")]
+fn save_keychain_credentials(contents: &[u8]) -> bool {
+    let Some(account) = security(&["find-generic-password", "-s", KEYCHAIN_SERVICE], None)
+        .and_then(|attrs| keychain_account(&String::from_utf8_lossy(&attrs)))
+    else {
+        return false;
+    };
+    let hex: String = contents.iter().map(|b| format!("{b:02x}")).collect();
+    let line = keychain_update_line(&account, &hex);
+    // Fed on stdin so the login stays out of the process list, unless it's too long
+    // for one line, where Claude Code passes it as arguments instead.
+    let saved = if line.len() <= SECURITY_LINE_MAX {
+        security(&["-i"], Some(&line))
+    } else {
+        security(
+            &[
+                "add-generic-password",
+                "-U",
+                "-a",
+                &account,
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-X",
+                &hex,
+            ],
+            None,
+        )
+    };
+    saved.is_some() && keychain_credentials().is_some_and(|raw| raw == contents)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn keychain_credentials() -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn save_keychain_credentials(_contents: &[u8]) -> bool {
+    false
+}
+
+/// The longest command `security -i` reads, the limit Claude Code uses.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SECURITY_LINE_MAX: usize = 4032;
+
+/// The account name on Claude Code's Keychain item, from `security`'s attribute listing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_account(attributes: &str) -> Option<String> {
+    let account = attributes
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("\"acct\"<blob>=\""))?
+        .strip_suffix('"')?;
+    // Claude Code only uses names like this, which are also safe inside quotes.
+    let plain = !account.is_empty()
+        && account
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    plain.then(|| account.to_string())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_update_line(account: &str, hex: &str) -> String {
+    format!("add-generic-password -U -a \"{account}\" -s \"{KEYCHAIN_SERVICE}\" -X \"{hex}\"\n")
 }
 
 fn window_values(w: UsageWindow) -> Option<(f64, Option<i64>)> {
@@ -485,11 +651,54 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_keychain_account_and_builds_the_update() {
+        let attrs = "keychain: \"/Users/me/Library/Keychains/login.keychain-db\"\nclass: \"genp\"\nattributes:\n    \"acct\"<blob>=\"brad.t-1\"\n    \"svce\"<blob>=\"Claude Code-credentials\"\n";
+        assert_eq!(keychain_account(attrs).as_deref(), Some("brad.t-1"));
+        assert_eq!(
+            keychain_account("    \"acct\"<blob>=0x00FF  \"\\000\"\n"),
+            None
+        );
+        assert_eq!(keychain_account("    \"acct\"<blob>=\"a\" b\"\n"), None);
+        assert_eq!(keychain_account("    \"acct\"<blob>=<NULL>\n"), None);
+        assert_eq!(
+            keychain_update_line("me", "7b7d"),
+            "add-generic-password -U -a \"me\" -s \"Claude Code-credentials\" -X \"7b7d\"\n"
+        );
+    }
+
+    #[test]
     fn missing_login_is_unknown_with_a_hint() {
         let mut source = ClaudeSource::new(PathBuf::from("/nonexistent-acm-test"));
         source.refresh(SystemTime::now());
         let usage = source.usage(SystemTime::now());
         assert_eq!(usage.status, UsageStatus::Unknown);
-        assert_eq!(usage.note.as_deref(), Some(SIGN_IN_HINT));
+        let installed = find_claude().is_some();
+        assert_eq!(
+            usage.note.as_deref(),
+            Some(no_login_hint(SIGN_IN_HINT, installed))
+        );
+        assert_eq!(usage.action.is_some(), installed);
+        assert_eq!(no_login_hint(EXPIRED_HINT, false), INSTALL_HINT);
+        assert_eq!(no_login_hint(EXPIRED_HINT, true), EXPIRED_HINT);
+    }
+
+    #[test]
+    fn a_new_login_is_noticed_after_a_failed_one() {
+        let home = std::env::temp_dir().join(format!("acm-claude-login-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut source = ClaudeSource::new(home.clone());
+        assert!(!source.login_changed());
+        // No token is expired-only, so this fails without a network request.
+        std::fs::write(home.join(".credentials.json"), r#"{"claudeAiOauth":{}}"#).unwrap();
+        source.refresh(SystemTime::now());
+        assert!(source.problem.is_some());
+        assert!(!source.login_changed());
+        std::fs::write(
+            home.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+        )
+        .unwrap();
+        assert!(source.login_changed());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

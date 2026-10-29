@@ -353,6 +353,7 @@ fn usage_from_reading(reading: &RateReading, now: i64) -> ProviderUsage {
         session,
         weekly,
         stale: false,
+        action: None,
     }
 }
 
