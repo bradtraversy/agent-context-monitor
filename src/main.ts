@@ -18,6 +18,7 @@ interface ProviderUsage {
   session: LimitWindow;
   weekly: LimitWindow;
   stale: boolean;
+  action: "sign_in" | null;
 }
 
 interface ContextMeasure {
@@ -87,6 +88,8 @@ let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
+// Why the last Sign in click couldn't open a terminal, by provider.
+const signInErrors = new Map<string, string>();
 
 function levelFor(used: number): Level {
   if (used >= CRITICAL) return "critical";
@@ -165,9 +168,15 @@ function usageCard(u: ProviderUsage): string {
       ? limitRow("Current session", u.session) + limitRow("This week", u.weekly)
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
+  const error = signInErrors.get(u.provider);
+  const action =
+    u.action === "sign_in"
+      ? `<button class="action" data-sign-in="${escape(u.provider)}">Sign in</button>` +
+        (error ? `<p class="note">${escape(error)}</p>` : "")
+      : "";
   return `<article class="card" data-stale="${u.stale}">
     <h2>${escape(u.name)} ${plan}</h2>
-    ${body}${note}
+    ${body}${note}${action}
     <div class="meta">${observed}</div>
   </article>`;
 }
@@ -225,6 +234,17 @@ function render() {
   chatList.innerHTML =
     (shown.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`) + more;
 }
+
+usagePanel.addEventListener("click", (e) => {
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-sign-in]");
+  if (!button) return;
+  const provider = button.dataset.signIn!;
+  // The card fills in by itself once the sign-in finishes.
+  invoke("sign_in", { provider })
+    .then(() => signInErrors.delete(provider))
+    .catch((error) => signInErrors.set(provider, String(error)))
+    .finally(render);
+});
 
 chatList.addEventListener("click", (e) => {
   if (!(e.target as HTMLElement).closest(".more")) return;

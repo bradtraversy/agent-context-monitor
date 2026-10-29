@@ -63,7 +63,8 @@ pub fn start(app: AppHandle) {
             let mut first = true;
             loop {
                 let now = SystemTime::now();
-                if unix_secs(now).saturating_sub(last_check) >= LIVE_REFRESH_AFTER_SECS {
+                let due = unix_secs(now).saturating_sub(last_check) >= LIVE_REFRESH_AFTER_SECS;
+                if due || source.login_changed() {
                     last_check = unix_secs(now);
                     source.refresh(now);
                     *claude.lock().unwrap() = source.clone();

@@ -14,13 +14,15 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use crate::model::{LimitWindow, ProviderUsage, UsageStatus, unix_secs};
+use crate::model::{LimitWindow, ProviderUsage, UsageAction, UsageStatus, unix_secs};
+use crate::programs;
 
 const PROVIDER: &str = "claude";
 const NAME: &str = "Claude";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const SIGN_IN_HINT: &str = "Sign in to Claude Code in a terminal to see Claude usage.";
-const EXPIRED_HINT: &str = "Claude's saved login expired. Open Claude Code to refresh it.";
+const SIGN_IN_HINT: &str = "Sign in to Claude Code to see Claude usage.";
+const EXPIRED_HINT: &str = "Claude's login expired. Sign in again to see usage.";
+const INSTALL_HINT: &str = "Install Claude Code to see Claude usage.";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 /// Renew this long before expiry, as Claude Code does.
@@ -101,6 +103,10 @@ pub struct ClaudeSource {
     credentials_path: PathBuf,
     last_good: Option<Reading>,
     problem: Option<String>,
+    /// The saved login, by fingerprint, when it last failed to give a reading, so a new
+    /// sign-in can be picked up right away.
+    failed_login: Option<u64>,
+    can_sign_in: bool,
 }
 
 impl ClaudeSource {
@@ -110,7 +116,22 @@ impl ClaudeSource {
             claude_home,
             last_good: None,
             problem: None,
+            failed_login: None,
+            can_sign_in: false,
         }
+    }
+
+    /// Whether the saved login changed since it last failed, e.g. after signing in.
+    pub fn login_changed(&self) -> bool {
+        self.failed_login
+            .is_some_and(|failed| failed != self.login_fingerprint())
+    }
+
+    fn login_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.read_login().map(|(raw, _)| raw).hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn refresh(&mut self, now: SystemTime) {
@@ -118,13 +139,20 @@ impl ClaudeSource {
             Ok(reading) => {
                 self.last_good = Some(reading);
                 self.problem = None;
+                self.failed_login = None;
+                self.can_sign_in = false;
             }
             Err(Failure::NoLogin(hint)) => {
                 // A missing or expired login must not leave an old number on screen.
                 self.last_good = None;
-                self.problem = Some(hint.to_string());
+                self.can_sign_in = find_claude().is_some();
+                self.problem = Some(no_login_hint(hint, self.can_sign_in).to_string());
+                self.failed_login = Some(self.login_fingerprint());
             }
-            Err(Failure::Request(msg)) => self.problem = Some(msg),
+            Err(Failure::Request(msg)) => {
+                self.problem = Some(msg);
+                self.failed_login = None;
+            }
         }
     }
 
@@ -268,13 +296,15 @@ impl ClaudeSource {
 
     pub fn usage(&self, now: SystemTime) -> ProviderUsage {
         let Some(reading) = &self.last_good else {
-            return ProviderUsage::unknown(
+            let mut usage = ProviderUsage::unknown(
                 PROVIDER,
                 NAME,
                 self.problem
                     .clone()
                     .unwrap_or_else(|| "Checking Claude usage.".into()),
             );
+            usage.action = self.can_sign_in.then_some(UsageAction::SignIn);
+            return usage;
         };
         let now = unix_secs(now);
         let to_window = |w: Option<(f64, Option<i64>)>| match w {
@@ -307,8 +337,33 @@ impl ClaudeSource {
             session,
             weekly,
             stale: false,
+            action: None,
         }
     }
+}
+
+fn find_claude() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd"]
+    } else {
+        &["claude"]
+    };
+    let home = std::env::home_dir().unwrap_or_default();
+    // Older installs keep Claude Code in its own folder instead of on PATH.
+    programs::find(names)
+        .or_else(|| Some(home.join(".claude").join("local").join(names[0])).filter(|p| p.is_file()))
+}
+
+/// Opens a terminal running Claude Code's own sign-in.
+pub fn sign_in() -> Result<(), String> {
+    let claude = find_claude().ok_or_else(|| INSTALL_HINT.to_string())?;
+    programs::open_in_terminal(&claude, &["auth", "login"])
+        .map_err(|_| "Couldn't open a terminal. Run claude auth login in one to sign in.".into())
+}
+
+/// Without Claude Code there's nothing to sign in with, so say to install it instead.
+fn no_login_hint(hint: &'static str, installed: bool) -> &'static str {
+    if installed { hint } else { INSTALL_HINT }
 }
 
 enum Failure {
@@ -617,6 +672,33 @@ mod tests {
         source.refresh(SystemTime::now());
         let usage = source.usage(SystemTime::now());
         assert_eq!(usage.status, UsageStatus::Unknown);
-        assert_eq!(usage.note.as_deref(), Some(SIGN_IN_HINT));
+        let installed = find_claude().is_some();
+        assert_eq!(
+            usage.note.as_deref(),
+            Some(no_login_hint(SIGN_IN_HINT, installed))
+        );
+        assert_eq!(usage.action.is_some(), installed);
+        assert_eq!(no_login_hint(EXPIRED_HINT, false), INSTALL_HINT);
+        assert_eq!(no_login_hint(EXPIRED_HINT, true), EXPIRED_HINT);
+    }
+
+    #[test]
+    fn a_new_login_is_noticed_after_a_failed_one() {
+        let home = std::env::temp_dir().join(format!("acm-claude-login-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut source = ClaudeSource::new(home.clone());
+        assert!(!source.login_changed());
+        // No token is expired-only, so this fails without a network request.
+        std::fs::write(home.join(".credentials.json"), r#"{"claudeAiOauth":{}}"#).unwrap();
+        source.refresh(SystemTime::now());
+        assert!(source.problem.is_some());
+        assert!(!source.login_changed());
+        std::fs::write(
+            home.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+        )
+        .unwrap();
+        assert!(source.login_changed());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

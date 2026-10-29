@@ -8,6 +8,7 @@ mod history;
 mod jsonl;
 mod model;
 mod monitor;
+mod programs;
 mod settings;
 mod tray;
 
@@ -28,6 +29,15 @@ fn get_snapshot(state: tauri::State<SharedSnapshot>) -> Snapshot {
 #[tauri::command]
 fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
+}
+
+/// Starts signing in to a provider whose usage card asked for it.
+#[tauri::command]
+fn sign_in(provider: String) -> Result<(), String> {
+    match provider.as_str() {
+        "claude" => claude::sign_in(),
+        _ => Err(format!("Signing in to {provider} isn't supported.")),
+    }
 }
 
 #[tauri::command]
@@ -119,7 +129,8 @@ pub fn run() {
             get_snapshot,
             get_history,
             set_context_limit,
-            resize_window
+            resize_window,
+            sign_in
         ])
         .setup(|app| {
             // A menu bar app on macOS, so no Dock icon next to the tray dot.

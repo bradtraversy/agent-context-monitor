@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 
 use crate::codex::{RateReading, RateWindow};
+use crate::programs;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_ID: u64 = 1;
@@ -126,20 +127,14 @@ fn reading_from(mut result: ReadResult, now: SystemTime) -> Option<RateReading> 
     })
 }
 
-/// Codex ships inside the desktop app as well as on PATH. An app opened from the Dock,
-/// Start menu, or a launcher gets a much shorter PATH than a terminal, so the usual
-/// install folders are searched too.
+/// Codex ships inside the desktop app as well as on PATH.
 fn find_codex() -> Option<PathBuf> {
     let names: &[&str] = if cfg!(windows) {
         &["codex.exe", "codex.cmd"]
     } else {
         &["codex"]
     };
-    search_dirs()
-        .into_iter()
-        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
-        .chain(BUNDLED.iter().map(PathBuf::from))
-        .find(|p| p.is_file())
+    programs::find(names).or_else(|| BUNDLED.iter().map(PathBuf::from).find(|p| p.is_file()))
 }
 
 const BUNDLED: &[&str] = &[
@@ -148,41 +143,6 @@ const BUNDLED: &[&str] = &[
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
 ];
-
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    let home = std::env::home_dir().unwrap_or_default();
-    if cfg!(windows) {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            dirs.push(PathBuf::from(appdata).join("npm"));
-        }
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            dirs.push(PathBuf::from(local).join("Programs").join("codex"));
-        }
-    } else {
-        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-            dirs.push(PathBuf::from(dir));
-        }
-        for dir in [
-            ".local/bin",
-            ".npm-global/bin",
-            ".bun/bin",
-            ".volta/bin",
-            ".cargo/bin",
-        ] {
-            dirs.push(home.join(dir));
-        }
-        // nvm keeps one folder per Node version; prefer the newest.
-        let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
-            .map(|entries| entries.flatten().map(|e| e.path().join("bin")).collect())
-            .unwrap_or_default();
-        nvm.sort();
-        dirs.extend(nvm.into_iter().rev());
-    }
-    dirs
-}
 
 /// The current PATH with `dir` in front, so Codex's own folder is searched first.
 fn path_with(dir: &Path) -> Option<std::ffi::OsString> {

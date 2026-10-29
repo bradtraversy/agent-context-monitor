@@ -58,6 +58,13 @@ pub enum UsageStatus {
     Unknown,
 }
 
+/// Something the user can do on the usage card to get a reading.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAction {
+    SignIn,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProviderUsage {
     pub provider: &'static str,
@@ -71,6 +78,7 @@ pub struct ProviderUsage {
     pub weekly: LimitWindow,
     /// The reading is too old to trust as the current value.
     pub stale: bool,
+    pub action: Option<UsageAction>,
 }
 
 /// Live usage is re-checked once the newest reading is this old, which keeps every
@@ -96,6 +104,7 @@ impl ProviderUsage {
             session: LimitWindow::NotReported,
             weekly: LimitWindow::NotReported,
             stale: false,
+            action: None,
         }
     }
 
