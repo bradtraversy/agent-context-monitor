@@ -1,0 +1,71 @@
+name: Install scripts
+
+# Runs the one-line install scripts against the latest release on all three
+# OSes, whenever the scripts change.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/install-test.yml
+  workflow_dispatch:
+
+jobs:
+  install:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (deb)
+            os: ubuntu-latest
+            format: deb
+          - name: Linux (AppImage)
+            os: ubuntu-latest
+            format: appimage
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run install.sh
+        if: runner.os != 'Windows'
+        env:
+          ACM_FORMAT: ${{ matrix.format }}
+          ACM_GITHUB_TOKEN: ${{ github.token }}
+        run: sh install.sh
+
+      - name: Check the install
+        if: runner.os != 'Windows'
+        run: |
+          case "$RUNNER_OS" in
+            macOS) test -x "/Applications/Agent Context Monitor.app/Contents/MacOS/agent-context-monitor"
+                   codesign --verify --deep --strict "/Applications/Agent Context Monitor.app" ;;
+            Linux) if [ "${{ matrix.format }}" = deb ]; then
+                     dpkg -s agent-context-monitor | grep -q '^Status: install ok installed'
+                     command -v agent-context-monitor
+                   else
+                     test -x "$HOME/.local/bin/agent-context-monitor"
+                   fi ;;
+          esac
+
+      - name: Run install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ACM_GITHUB_TOKEN: ${{ github.token }}
+        run: Get-Content install.ps1 -Raw | Invoke-Expression
+
+      - name: Check the install
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Agent Context Monitor\agent-context-monitor.exe'
+          if (-not (Test-Path $exe)) { throw "$exe is missing" }
+          Start-Sleep -Seconds 3
+          Get-Process -Name 'agent-context-monitor' | Stop-Process -Force
