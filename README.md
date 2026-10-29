@@ -10,7 +10,21 @@ A small desktop app that lives in your tray and shows how much Claude Code and C
 
 ## Install
 
-Download the installer for your system from the [latest release](https://github.com/bradtraversy/agent-context-monitor/releases/latest).
+On macOS or Linux, run this in a terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bradtraversy/agent-context-monitor/main/install.sh | sh
+```
+
+On Windows, run this in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/bradtraversy/agent-context-monitor/main/install.ps1 | iex
+```
+
+Both download the latest release for your system and install it. Run the same command again to update. On Linux it uses the `.deb` or `.rpm` when your system has apt or dnf, otherwise the AppImage in `~/.local/bin`.
+
+Or download the installer yourself from the [latest release](https://github.com/bradtraversy/agent-context-monitor/releases/latest).
 
 - macOS: the `.dmg`. Works on Apple Silicon and Intel, macOS 11 or later.
 - Windows: the `-setup.exe` or the `.msi`. If Windows shows "Windows protected your PC", click More info, then Run anyway.
