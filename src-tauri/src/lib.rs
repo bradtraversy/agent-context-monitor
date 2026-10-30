@@ -122,7 +122,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![tray::HIDDEN_ARG]),
         ))
         .manage(SharedSnapshot::default())
         .invoke_handler(tauri::generate_handler![
@@ -143,15 +143,22 @@ pub fn run() {
                 .map(|d| d.join("settings.json"));
             app.manage(Settings::load(path));
             tray::create(app.handle())?;
+            tray::refresh_autostart(app.handle());
+            // The window starts hidden, and stays that way when started at login.
+            if !std::env::args().any(|a| a == tray::HIDDEN_ARG) {
+                tray::show_window(app.handle());
+            }
             monitor::start(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // Closing the window keeps the app in the tray; Quit lives in the tray menu.
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            WindowEvent::Focused(false) => tray::window_blurred(),
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running Agent Context Monitor");

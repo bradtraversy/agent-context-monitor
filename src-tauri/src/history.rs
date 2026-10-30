@@ -150,8 +150,9 @@ pub fn load(
     weeks: usize,
 ) -> Vec<ProviderHistory> {
     // Nothing older than the retention window is kept, so asking for more shows nothing new.
-    let days = days.clamp(1, (KEEP_SECS / DAY) as usize);
-    let weeks = weeks.clamp(1, days.div_ceil(7) + 1);
+    let kept_days = (KEEP_SECS / DAY) as usize;
+    let days = days.clamp(1, kept_days);
+    let weeks = weeks.clamp(1, kept_days.div_ceil(7) + 1);
     let samples = read_samples(path);
     providers
         .iter()
@@ -314,5 +315,23 @@ mod tests {
         let bars = weekly(&refs, NOW, 8);
         let peaks: Vec<(Option<f64>, bool)> = bars.iter().map(|b| (b.used, b.current)).collect();
         assert_eq!(peaks, vec![(Some(82.0), false), (Some(40.0), true)]);
+    }
+
+    #[test]
+    fn a_short_daily_range_still_gets_every_week_asked_for() {
+        let dir = std::env::temp_dir().join(format!("acm-history-weeks-{}", std::process::id()));
+        let path = dir.join("usage-history.jsonl");
+        fs::create_dir_all(&dir).unwrap();
+        let text: String = (0..10)
+            .map(|week| sample(NOW - week * 7 * DAY, 50.0, NOW - week * 7 * DAY + DAY))
+            .map(|s| line(&s))
+            .collect();
+        fs::write(&path, text).unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(NOW as u64);
+        let providers = [("claude".to_string(), "Claude".to_string())];
+        let history = load(&path, &providers, now, 0, 14, 8);
+        assert_eq!(history[0].daily.len(), 14);
+        assert_eq!(history[0].weekly.len(), 8);
+        let _ = fs::remove_dir_all(dir);
     }
 }

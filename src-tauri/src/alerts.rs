@@ -22,7 +22,7 @@ pub struct Alert {
     pub body: String,
 }
 
-#[derive(Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Sent {
     chats: HashSet<String>,
     /// Provider, window label, and reset time, so a new window can alert again.
@@ -58,14 +58,15 @@ impl Alerts {
     }
 
     pub fn check(&mut self, snapshot: &Snapshot, now: SystemTime) -> Vec<Alert> {
-        let before = serde_json::to_vec(&self.sent).unwrap_or_default();
+        let before = self.sent.clone();
         let alerts = self.find(snapshot, now);
         // Windows that reset long ago can't come back, so they needn't be kept.
         let cutoff = unix_secs(now) - RESET_JITTER_SECS;
         self.sent
             .windows
             .retain(|(_, _, r)| r.is_none_or(|r| r > cutoff));
-        if serde_json::to_vec(&self.sent).unwrap_or_default() != before {
+        // Compared as sets, since the saved order of chats changes from run to run.
+        if self.sent != before {
             self.save();
         }
         alerts

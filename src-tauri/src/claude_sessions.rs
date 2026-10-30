@@ -318,6 +318,11 @@ impl Transcript {
             return;
         }
         let Some(message) = rec.message else { return };
+        // Claude Code writes its own error notes (an overloaded API, say) as assistant
+        // messages with no usage. They say nothing about the context, so skip them.
+        if message.model.as_deref() == Some("<synthetic>") {
+            return;
+        }
         let Some(usage) = message.usage else { return };
         let requested = rec.requested_model.or(message.model);
         let counts = usage
@@ -521,6 +526,17 @@ mod tests {
         assert!(t.context.is_none());
         let t = read(&[assistant("claude-opus-5-5[1m]", 0, 0, "")]);
         assert!(t.context.is_none());
+    }
+
+    #[test]
+    fn api_error_notes_keep_the_last_reading() {
+        let error = r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-10-19T12:01:00Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 overloaded"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}"#;
+        let t = read(&[
+            assistant("claude-opus-5-5[1m]", 1, 5000, ""),
+            error.to_string(),
+        ]);
+        assert_eq!(t.context.as_ref().unwrap().used_tokens, 5001);
+        assert_eq!(t.model.as_deref(), Some("claude-opus-5-5[1m]"));
     }
 
     #[test]

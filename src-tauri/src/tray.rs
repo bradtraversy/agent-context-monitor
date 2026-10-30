@@ -1,13 +1,23 @@
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
+
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::model::{Level, Snapshot};
 
 const TRAY_ID: &str = "acm";
 const ICON_SIZE: u32 = 64;
+/// Passed by Start at login so the app starts quietly in the tray.
+pub const HIDDEN_ARG: &str = "--hidden";
+/// Clicking the tray takes focus from the window just before the click arrives, so a
+/// window that lost focus this recently still counts as the one in front.
+const CLICK_BLUR: Duration = Duration::from_millis(500);
+
+static LAST_BLUR: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     // Linux tray hosts only show the menu, so opening the window must be a menu item.
@@ -72,9 +82,28 @@ pub fn show_window(app: &AppHandle) {
     }
 }
 
+/// Called when the window loses focus.
+pub fn window_blurred() {
+    *LAST_BLUR.lock().unwrap() = Some(Instant::now());
+}
+
+/// Start at login entries made before the hidden flag existed open the full window, so
+/// rewrite an existing one with the current arguments.
+pub fn refresh_autostart(app: &AppHandle) {
+    let autolaunch = app.autolaunch();
+    if autolaunch.is_enabled().unwrap_or(false) {
+        let _ = autolaunch.enable();
+    }
+}
+
 fn toggle_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+        let just_blurred = LAST_BLUR
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t.elapsed() < CLICK_BLUR);
+        let in_front = window.is_focused().unwrap_or(false) || just_blurred;
+        if window.is_visible().unwrap_or(false) && in_front {
             let _ = window.hide();
         } else {
             show_window(app);
