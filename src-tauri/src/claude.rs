@@ -30,6 +30,8 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const RENEW_AHEAD_MS: i64 = 5 * 60 * 1000;
 /// Claude Code treats a refresh lock older than this as left behind by a crash.
 const STALE_LOCK: Duration = Duration::from_secs(60);
+/// How long to hold off extra usage checks after Claude says there are too many.
+const BUSY_BACKOFF_SECS: i64 = 2 * 60;
 const OAUTH_KEY: &str = "claudeAiOauth";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
@@ -142,6 +144,8 @@ pub struct ClaudeSource {
     can_sign_in: bool,
     /// Whether to look in the macOS Keychain, where Claude Code keeps its live login.
     keychain: bool,
+    /// Unix seconds until which Claude has asked for fewer usage checks.
+    busy_until: i64,
 }
 
 impl ClaudeSource {
@@ -154,7 +158,13 @@ impl ClaudeSource {
             failed_login: None,
             can_sign_in: false,
             keychain: cfg!(target_os = "macos"),
+            busy_until: 0,
         }
+    }
+
+    /// True while Claude has asked for fewer usage checks, so only the regular check runs.
+    pub fn backing_off(&self, now: SystemTime) -> bool {
+        unix_secs(now) < self.busy_until
     }
 
     /// Whether the saved login changed since it last failed, e.g. after signing in.
@@ -187,6 +197,11 @@ impl ClaudeSource {
             }
             Err(Failure::Request(msg)) => {
                 self.problem = Some(msg);
+                self.failed_login = None;
+            }
+            Err(Failure::TooManyChecks) => {
+                // The last reading stays on screen; it is retried after the back-off.
+                self.busy_until = unix_secs(now) + BUSY_BACKOFF_SECS;
                 self.failed_login = None;
             }
         }
@@ -272,6 +287,7 @@ impl ClaudeSource {
             Err(ureq::Error::StatusCode(401 | 403)) => {
                 return Err(Failure::NoLogin(SIGN_IN_HINT));
             }
+            Err(ureq::Error::StatusCode(429)) => return Err(Failure::TooManyChecks),
             Err(ureq::Error::StatusCode(code)) => {
                 return Err(Failure::Request(format!(
                     "Claude usage request failed ({code})."
@@ -425,6 +441,8 @@ fn no_login_hint(hint: &'static str, installed: bool) -> &'static str {
 enum Failure {
     NoLogin(&'static str),
     Request(String),
+    /// Claude answered 429: usage is being checked too often.
+    TooManyChecks,
 }
 
 fn parse_oauth(raw: &[u8]) -> Option<OAuth> {

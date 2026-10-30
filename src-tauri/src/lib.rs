@@ -13,13 +13,14 @@ mod programs;
 mod settings;
 mod tray;
 
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use tauri::{Manager, WindowEvent};
 
 use crate::history::ProviderHistory;
 use crate::model::Snapshot;
-use crate::monitor::{HistoryFile, SharedSnapshot};
+use crate::monitor::{CheckNow, HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
 
 #[tauri::command]
@@ -136,6 +137,7 @@ pub fn run() {
             Some(vec![tray::HIDDEN_ARG]),
         ))
         .manage(SharedSnapshot::default())
+        .manage(CheckNow::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_history,
@@ -167,6 +169,10 @@ pub fn run() {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+            }
+            // Opening the window should show fresh usage, not a reading from minutes ago.
+            WindowEvent::Focused(true) => {
+                window.state::<CheckNow>().0.store(true, Ordering::Relaxed);
             }
             WindowEvent::Focused(false) => tray::window_blurred(),
             _ => {}
