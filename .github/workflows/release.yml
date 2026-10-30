@@ -94,10 +94,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # The multi-line form keeps a value that spans lines (a wrapped base64
+        # certificate) whole, where name=value would keep only its first line.
         run: |
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
                       APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            echo "$name=${!name}" >> "$GITHUB_ENV"
+            delimiter="ACM_$(openssl rand -hex 8)"
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "${!name}" "$delimiter" >> "$GITHUB_ENV"
           done
 
       # Windows signing uses Azure Artifact Signing, logged in through GitHub

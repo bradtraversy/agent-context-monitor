@@ -53,7 +53,7 @@ impl Alerts {
             let _ = fs::create_dir_all(dir);
         }
         if let Ok(json) = serde_json::to_vec(&self.sent) {
-            let _ = fs::write(path, json);
+            let _ = crate::files::replace(path, &json);
         }
     }
 
@@ -114,6 +114,13 @@ impl Alerts {
                     continue;
                 };
                 if *used_percent < CRITICAL_PERCENT {
+                    // With no reset time to tell windows apart, dropping back below
+                    // the threshold is the sign of a new one.
+                    if resets_at.is_none() {
+                        self.sent.windows.retain(|(p, l, r)| {
+                            !(p == usage.provider && l == label && r.is_none())
+                        });
+                    }
                     continue;
                 }
                 // Reset times jitter between readings, so a near match is the same window.
@@ -126,13 +133,8 @@ impl Alerts {
                         label.to_string(),
                         *resets_at,
                     ));
-                    let what = if label == "session" {
-                        "session"
-                    } else {
-                        "weekly"
-                    };
                     alerts.push(Alert {
-                        title: format!("{} {what} usage is almost gone", usage.name),
+                        title: format!("{} {label} usage is almost gone", usage.name),
                         body: format!("{:.0}% left.", (100.0 - used_percent).max(0.0)),
                     });
                 }
@@ -278,5 +280,27 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_window_without_a_reset_time_alerts_again_after_dropping() {
+        let usage = |used| {
+            let mut u = ProviderUsage::unknown("codex", "Codex", "");
+            u.weekly = LimitWindow::Reported {
+                used_percent: used,
+                resets_at: None,
+            };
+            u
+        };
+        let mut alerts = Alerts::default();
+        let mut check = |used| {
+            alerts
+                .check(&snapshot(vec![usage(used)], vec![]), now())
+                .len()
+        };
+        assert_eq!(check(95.0), 1);
+        assert_eq!(check(96.0), 0);
+        assert_eq!(check(10.0), 0);
+        assert_eq!(check(92.0), 1);
     }
 }

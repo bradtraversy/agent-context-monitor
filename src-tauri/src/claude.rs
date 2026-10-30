@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
+use crate::files;
 use crate::model::{LimitWindow, ProviderUsage, UsageAction, UsageStatus, unix_secs};
 use crate::programs;
 
@@ -31,6 +32,38 @@ const RENEW_AHEAD_MS: i64 = 5 * 60 * 1000;
 const STALE_LOCK: Duration = Duration::from_secs(60);
 const OAUTH_KEY: &str = "claudeAiOauth";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The Keychain item Claude Code uses. With its own config folder it adds the start
+/// of a hash of that folder's path, so each folder keeps a separate login.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_service() -> String {
+    let var = |name| std::env::var(name).ok();
+    let (default, dir) = match var("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
+        Some(dir) if dir.is_empty() => (true, String::new()),
+        Some(dir) => (false, dir),
+        None => match var("CLAUDE_CONFIG_DIR") {
+            Some(dir) if !dir.is_empty() => (false, dir),
+            _ => (true, String::new()),
+        },
+    };
+    keychain_service_for((!default).then_some(dir.as_str()))
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_service_for(config_dir: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match config_dir {
+        None => KEYCHAIN_SERVICE.to_string(),
+        Some(dir) => {
+            let hash: String = Sha256::digest(dir.as_bytes())
+                .iter()
+                .take(4)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("{KEYCHAIN_SERVICE}-{hash}")
+        }
+    }
+}
 
 /// Where Claude Code keeps the login, which is also where renewed tokens go.
 #[derive(Clone, Copy)]
@@ -55,7 +88,7 @@ struct OAuth {
     expires_at_ms: Option<i64>,
     #[serde(rename = "subscriptionType")]
     subscription: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     scopes: Vec<String>,
     #[serde(rename = "clientId")]
     client_id: Option<String>,
@@ -188,7 +221,7 @@ impl ClaudeSource {
     fn can_write_store(&self, store: Store) -> bool {
         match store {
             Store::File => {
-                let probe = private_tmp_path(&self.credentials_path);
+                let probe = files::tmp_path(&self.credentials_path);
                 let ok = std::fs::File::create(&probe).is_ok();
                 let _ = std::fs::remove_file(&probe);
                 ok
@@ -199,7 +232,7 @@ impl ClaudeSource {
 
     fn write_store(&self, store: Store, contents: &[u8]) -> bool {
         match store {
-            Store::File => write_private(&self.credentials_path, contents).is_ok(),
+            Store::File => files::replace(&self.credentials_path, contents).is_ok(),
             Store::Keychain => save_keychain_credentials(contents),
         }
     }
@@ -439,28 +472,6 @@ fn apply_tokens(raw: &[u8], tokens: &TokenResponse, now_ms: i64) -> Option<Vec<u
     serde_json::to_vec(&creds).ok()
 }
 
-/// Replaces the file in one step, readable only by its owner.
-fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = private_tmp_path(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let result = options
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(contents).and_then(|_| f.sync_all()))
-        .and_then(|_| std::fs::rename(&tmp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-fn private_tmp_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("json.acm-{}", std::process::id()))
-}
-
 /// Claude Code's OAuth refresh lock: the `.oauth_refresh.lock` directory in its
 /// config folder plus the older `<config folder>.lock`, taken in that order the way
 /// its lock library does, by creating the directories.
@@ -535,7 +546,7 @@ fn security(args: &[&str], input: Option<&str>) -> Option<Vec<u8>> {
 #[cfg(target_os = "macos")]
 fn keychain_credentials() -> Option<Vec<u8>> {
     let mut raw = security(
-        &["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+        &["find-generic-password", "-s", &keychain_service(), "-w"],
         None,
     )?;
     while raw.last().is_some_and(u8::is_ascii_whitespace) {
@@ -552,7 +563,8 @@ fn save_keychain_credentials(contents: &[u8]) -> bool {
         return false;
     };
     let hex: String = contents.iter().map(|b| format!("{b:02x}")).collect();
-    let line = keychain_update_line(&account, &hex);
+    let service = keychain_service();
+    let line = keychain_update_line(&account, &service, &hex);
     // Fed on stdin so the login stays out of the process list, unless it's too long
     // for one line, where Claude Code passes it as arguments instead.
     let saved = if line.len() <= SECURITY_LINE_MAX {
@@ -565,7 +577,7 @@ fn save_keychain_credentials(contents: &[u8]) -> bool {
                 "-a",
                 &account,
                 "-s",
-                KEYCHAIN_SERVICE,
+                &service,
                 "-X",
                 &hex,
             ],
@@ -578,7 +590,7 @@ fn save_keychain_credentials(contents: &[u8]) -> bool {
 /// The account name on Claude Code's Keychain item, needed to update it.
 #[cfg(target_os = "macos")]
 fn keychain_item_account() -> Option<String> {
-    security(&["find-generic-password", "-s", KEYCHAIN_SERVICE], None)
+    security(&["find-generic-password", "-s", &keychain_service()], None)
         .and_then(|attrs| keychain_account(&String::from_utf8_lossy(&attrs)))
 }
 
@@ -617,8 +629,8 @@ fn keychain_account(attributes: &str) -> Option<String> {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn keychain_update_line(account: &str, hex: &str) -> String {
-    format!("add-generic-password -U -a \"{account}\" -s \"{KEYCHAIN_SERVICE}\" -X \"{hex}\"\n")
+fn keychain_update_line(account: &str, service: &str, hex: &str) -> String {
+    format!("add-generic-password -U -a \"{account}\" -s \"{service}\" -X \"{hex}\"\n")
 }
 
 fn window_values(w: UsageWindow) -> Option<(f64, Option<i64>)> {
@@ -714,8 +726,17 @@ mod tests {
         assert_eq!(keychain_account("    \"acct\"<blob>=\"a\" b\"\n"), None);
         assert_eq!(keychain_account("    \"acct\"<blob>=<NULL>\n"), None);
         assert_eq!(
-            keychain_update_line("me", "7b7d"),
+            keychain_update_line("me", KEYCHAIN_SERVICE, "7b7d"),
             "add-generic-password -U -a \"me\" -s \"Claude Code-credentials\" -X \"7b7d\"\n"
+        );
+    }
+
+    #[test]
+    fn a_separate_config_folder_has_its_own_keychain_item() {
+        assert_eq!(keychain_service_for(None), "Claude Code-credentials");
+        assert_eq!(
+            keychain_service_for(Some("/Users/me/.claude-work")),
+            "Claude Code-credentials-1e91dd84"
         );
     }
 

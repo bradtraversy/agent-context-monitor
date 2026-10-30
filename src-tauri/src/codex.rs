@@ -33,6 +33,16 @@ pub(crate) struct RateReading {
     pub windows: Vec<RateWindow>,
 }
 
+impl RateReading {
+    /// When it was read, compared as a time rather than as text, since the formats
+    /// differ (`...28Z` against `...28.500Z`). None when there's no readable time.
+    fn observed_ms(&self) -> Option<i64> {
+        chrono::DateTime::parse_from_rfc3339(&self.observed_at)
+            .ok()
+            .map(|t| t.timestamp_millis())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct RateWindow {
     pub used_percent: f64,
@@ -193,9 +203,9 @@ impl CodexSource {
         self.files
             .values()
             .filter_map(|f| f.rate.as_ref())
-            .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.observed_at).ok())
-            .map(|t| t.timestamp())
+            .filter_map(RateReading::observed_ms)
             .max()
+            .map(|ms| ms / 1000)
     }
 
     /// The newest reading wins, whether from a session file or asked of Codex live.
@@ -205,7 +215,8 @@ impl CodexSource {
             .values()
             .filter_map(|f| f.rate.as_ref())
             .chain(live)
-            .max_by(|a, b| a.observed_at.cmp(&b.observed_at));
+            .filter(|r| r.observed_ms().is_some())
+            .max_by_key(|r| r.observed_ms());
         match newest {
             None => ProviderUsage::unknown(
                 PROVIDER,
@@ -508,6 +519,13 @@ mod tests {
         );
         assert!(
             matches!(weekly(source.usage(now, None)), LimitWindow::Reported { used_percent, .. } if used_percent == 14.0)
+        ); // A whole second written without fractions is still older than .563 past it.
+        let older = RateReading {
+            observed_at: "2026-10-19T13:03:28Z".into(),
+            ..live
+        };
+        assert!(
+            matches!(weekly(source.usage(now, Some(&older))), LimitWindow::Reported { used_percent, .. } if used_percent == 14.0)
         );
     }
 }

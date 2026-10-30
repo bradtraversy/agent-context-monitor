@@ -25,9 +25,10 @@ use crate::model::{
 const PROVIDER: &str = "claude";
 const ONE_MILLION: u64 = 1_000_000;
 const TWO_HUNDRED_K: u64 = 200_000;
-/// Used when liveness cannot be checked against the process table.
+/// Without Linux's process start times, a pid could belong to a newer process, so a
+/// registry entry not updated for this long is taken as left behind.
 #[cfg(not(target_os = "linux"))]
-const REGISTRY_FRESHNESS_SECS: i64 = 30 * 60;
+const REGISTRY_FRESHNESS_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Deserialize)]
 struct RegistryEntry {
@@ -74,11 +75,11 @@ struct Message {
 
 #[derive(Deserialize, Clone, Copy)]
 struct Counts {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     cache_creation_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     cache_read_input_tokens: u64,
 }
 
@@ -92,7 +93,7 @@ impl Counts {
 struct Usage {
     #[serde(flatten)]
     totals: Counts,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     iterations: Vec<Iteration>,
 }
 
@@ -207,7 +208,10 @@ impl ClaudeSessions {
             }
             let id = id.clone();
             let mut transcript = self.transcripts.remove(&id).unwrap_or_default();
-            transcript.read_new(path);
+            // Deleted since the last folder search.
+            if !transcript.read_new(path) {
+                continue;
+            }
             chats.push(ChatContext {
                 provider: PROVIDER,
                 title: desktop
@@ -222,7 +226,8 @@ impl ClaudeSessions {
                 context: transcript.context.clone(),
                 last_activity: transcript.modified.map(unix_secs).unwrap_or(0),
                 subagents: 0,
-                activity: None,
+                // Not in the live list, so Claude Code isn't running it.
+                activity: Some(Activity::Idle),
                 id: id.clone(),
             });
             transcripts.insert(id, transcript);
@@ -366,14 +371,18 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
 /// `claude-opus-5-5[1m]`. Other Claude models use the standard 200k window, unless
 /// the chat has already gone past it. Models that aren't Claude stay unknown.
 fn window_from_model(model: &str, used: u64) -> Option<u64> {
-    if model.ends_with("[1m]") || used > TWO_HUNDRED_K {
+    if model.ends_with("[1m]") {
         return Some(ONE_MILLION);
     }
-    let model = model.to_ascii_lowercase();
-    ["claude", "opus", "sonnet", "haiku"]
+    let lower = model.to_ascii_lowercase();
+    let claude = ["claude", "opus", "sonnet", "haiku"]
         .iter()
-        .any(|family| model.contains(family))
-        .then_some(TWO_HUNDRED_K)
+        .any(|family| lower.contains(family));
+    claude.then_some(if used > TWO_HUNDRED_K {
+        ONE_MILLION
+    } else {
+        TWO_HUNDRED_K
+    })
 }
 
 fn surface_label(entrypoint: &str) -> String {
@@ -417,9 +426,41 @@ fn is_alive(entry: &RegistryEntry, _now: SystemTime) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn is_alive(entry: &RegistryEntry, now: SystemTime) -> bool {
+    // A session that crashed leaves its entry behind, so its process must still run.
     entry
         .updated_at_ms
         .is_some_and(|ms| unix_secs(now) - ms / 1000 <= REGISTRY_FRESHNESS_SECS)
+        && process_running(entry.pid)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 only checks; a process owned by someone else answers EPERM.
+    // SAFETY: kill with signal 0 sends nothing and touches no memory.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the handle is checked before use and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
 }
 
 /// Claude stores each transcript as `projects/<encoded cwd>/<session id>.jsonl`.
@@ -491,6 +532,10 @@ mod tests {
             Some(TWO_HUNDRED_K)
         );
         assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
+        let big = read(&[assistant("some-other-model", 1, 299_999, "")])
+            .context
+            .unwrap();
+        assert_eq!(big.context_window, None);
         let unknown = window("some-future-model");
         assert_eq!(unknown.used_tokens, 1_000);
         assert_eq!(unknown.context_window, None);
@@ -526,6 +571,16 @@ mod tests {
         assert!(t.context.is_none());
         let t = read(&[assistant("claude-opus-5-5[1m]", 0, 0, "")]);
         assert!(t.context.is_none());
+    }
+
+    #[test]
+    fn null_counts_still_give_a_reading() {
+        let line = assistant("claude-opus-5-5[1m]", 10, 990, r#","iterations":null"#).replace(
+            r#""cache_creation_input_tokens":0"#,
+            r#""cache_creation_input_tokens":null"#,
+        );
+        let ctx = read(&[line]).context.unwrap();
+        assert_eq!(ctx.used_tokens, 1_000);
     }
 
     #[test]
