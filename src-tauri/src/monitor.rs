@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -20,6 +20,14 @@ use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const LIVE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the Claude check looks for a reason to ask Claude for fresh usage.
+const CLAUDE_TICK: Duration = Duration::from_secs(1);
+/// While a Claude chat is being used, usage is checked this often so the numbers keep up.
+const CLAUDE_ACTIVE_GAP_SECS: i64 = 20;
+/// Opening the window re-checks usage unless it was checked this recently.
+const CLAUDE_OPEN_GAP_SECS: i64 = 5;
+/// How often to look for a new sign-in after the saved login stopped working.
+const LOGIN_PROBE_SECS: i64 = 30;
 /// How long the window keeps its loading spinner waiting for the first live checks, so it
 /// opens on fresh numbers instead of old ones from session files.
 const FIRST_CHECK_WAIT: Duration = Duration::from_secs(15);
@@ -27,6 +35,10 @@ const LIVE_SOURCES: usize = 2;
 
 #[derive(Default)]
 pub struct SharedSnapshot(pub Mutex<Snapshot>);
+
+/// Set when the window is opened, so live usage is re-checked right away.
+#[derive(Default)]
+pub struct CheckNow(pub Arc<AtomicBool>);
 
 /// Where usage readings are kept so the History tab can chart them.
 pub struct HistoryFile(pub PathBuf);
@@ -54,23 +66,37 @@ pub fn start(app: AppHandle) {
     let started = Instant::now();
     let first_checks_done = Arc::new(AtomicUsize::new(0));
     let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home.clone())));
+    let check_now = Arc::clone(&app.state::<CheckNow>().0);
+    // Unix seconds of the last write to any Claude chat, so usage follows Claude in use.
+    let newest_claude_chat = Arc::new(AtomicI64::new(i64::MIN));
     {
         let claude = Arc::clone(&claude);
         let first_checks_done = Arc::clone(&first_checks_done);
+        let newest_claude_chat = Arc::clone(&newest_claude_chat);
         thread::spawn(move || {
             let mut source = claude.lock().unwrap().clone();
             let mut last_check = i64::MIN;
+            let mut last_login_probe = i64::MIN;
             let mut first = true;
             loop {
                 let now = SystemTime::now();
-                let due = unix_secs(now).saturating_sub(last_check) >= LIVE_REFRESH_AFTER_SECS;
-                if due || source.login_changed() {
-                    last_check = unix_secs(now);
+                let secs = unix_secs(now);
+                let reason = CheckReason {
+                    opened: check_now.swap(false, Ordering::Relaxed),
+                    chat_active: newest_claude_chat.load(Ordering::Relaxed) >= last_check,
+                };
+                let mut due = claude_check_due(secs, last_check, reason, source.backing_off(now));
+                if !due && secs.saturating_sub(last_login_probe) >= LOGIN_PROBE_SECS {
+                    last_login_probe = secs;
+                    due = source.login_changed();
+                }
+                if due {
+                    last_check = secs;
                     source.refresh(now);
                     *claude.lock().unwrap() = source.clone();
                 }
                 mark_first_check(&mut first, &first_checks_done);
-                thread::sleep(LIVE_CHECK_INTERVAL);
+                thread::sleep(CLAUDE_TICK);
             }
         });
     }
@@ -126,6 +152,9 @@ pub fn start(app: AppHandle) {
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
+            if let Some(newest) = chats.iter().map(|c| c.last_activity).max() {
+                newest_claude_chat.store(newest, Ordering::Relaxed);
+            }
             chats.extend(codex.chats(now));
             for chat in &mut chats {
                 chat.context = chat.context.take().map(|c| c.with_limit(limit));
@@ -145,6 +174,29 @@ pub fn start(app: AppHandle) {
             thread::sleep(REFRESH_INTERVAL);
         }
     });
+}
+
+#[derive(Clone, Copy, Default)]
+struct CheckReason {
+    /// The window was just opened.
+    opened: bool,
+    /// A Claude chat was written to since the last check.
+    chat_active: bool,
+}
+
+/// Whether to ask Claude for fresh usage now. The regular check keeps readings under the
+/// freshness limit; opening the window or using Claude checks sooner, unless Claude has
+/// asked for fewer checks.
+fn claude_check_due(now: i64, last_check: i64, reason: CheckReason, backing_off: bool) -> bool {
+    let age = now.saturating_sub(last_check);
+    if age >= LIVE_REFRESH_AFTER_SECS {
+        return true;
+    }
+    if backing_off {
+        return false;
+    }
+    (reason.opened && age >= CLAUDE_OPEN_GAP_SECS)
+        || (reason.chat_active && age >= CLAUDE_ACTIVE_GAP_SECS)
 }
 
 /// Counts a live source's first check, done or failed, so the window can stop waiting on it.
@@ -171,4 +223,77 @@ fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OPENED: CheckReason = CheckReason {
+        opened: true,
+        chat_active: false,
+    };
+    const ACTIVE: CheckReason = CheckReason {
+        opened: false,
+        chat_active: true,
+    };
+    const QUIET: CheckReason = CheckReason {
+        opened: false,
+        chat_active: false,
+    };
+
+    #[test]
+    fn first_check_runs_right_away() {
+        assert!(claude_check_due(1000, i64::MIN, QUIET, false));
+    }
+
+    #[test]
+    fn quiet_usage_is_checked_before_it_goes_stale() {
+        assert!(!claude_check_due(
+            1000 + LIVE_REFRESH_AFTER_SECS - 1,
+            1000,
+            QUIET,
+            false
+        ));
+        assert!(claude_check_due(
+            1000 + LIVE_REFRESH_AFTER_SECS,
+            1000,
+            QUIET,
+            false
+        ));
+    }
+
+    #[test]
+    fn opening_the_window_checks_unless_just_checked() {
+        assert!(!claude_check_due(1003, 1000, OPENED, false));
+        assert!(claude_check_due(
+            1000 + CLAUDE_OPEN_GAP_SECS,
+            1000,
+            OPENED,
+            false
+        ));
+    }
+
+    #[test]
+    fn claude_in_use_is_checked_often() {
+        assert!(!claude_check_due(1010, 1000, ACTIVE, false));
+        assert!(claude_check_due(
+            1000 + CLAUDE_ACTIVE_GAP_SECS,
+            1000,
+            ACTIVE,
+            false
+        ));
+    }
+
+    #[test]
+    fn backing_off_keeps_only_the_regular_check() {
+        assert!(!claude_check_due(1100, 1000, OPENED, true));
+        assert!(!claude_check_due(1100, 1000, ACTIVE, true));
+        assert!(claude_check_due(
+            1000 + LIVE_REFRESH_AFTER_SECS,
+            1000,
+            QUIET,
+            true
+        ));
+    }
 }

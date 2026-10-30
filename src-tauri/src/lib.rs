@@ -12,13 +12,14 @@ mod programs;
 mod settings;
 mod tray;
 
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use tauri::{Manager, WindowEvent};
 
 use crate::history::ProviderHistory;
 use crate::model::Snapshot;
-use crate::monitor::{HistoryFile, SharedSnapshot};
+use crate::monitor::{CheckNow, HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
 
 #[tauri::command]
@@ -125,6 +126,7 @@ pub fn run() {
             None,
         ))
         .manage(SharedSnapshot::default())
+        .manage(CheckNow::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_history,
@@ -148,9 +150,16 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             // Closing the window keeps the app in the tray; Quit lives in the tray menu.
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // Opening the window should show fresh usage, not a reading from minutes ago.
+                WindowEvent::Focused(true) => {
+                    window.state::<CheckNow>().0.store(true, Ordering::Relaxed);
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
