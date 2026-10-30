@@ -31,7 +31,10 @@ cleanup() {
   if [ -n "${mnt:-}" ] && [ -d "$mnt" ]; then hdiutil detach "$mnt" -quiet 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Stop on Ctrl-C too, instead of carrying on after the files are gone. Exiting runs cleanup.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ -n "${ACM_VERSION:-}" ]; then
   api="https://api.github.com/repos/$REPO/releases/tags/$ACM_VERSION"
