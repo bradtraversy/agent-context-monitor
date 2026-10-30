@@ -217,10 +217,14 @@ function chatRow(c: ChatContext): string {
   </article>`;
 }
 
+let usageHtml = "";
+
 function render() {
   // The first check takes a few seconds, and until then the page keeps its loading spinners.
   if (!snapshot?.usage.length) return;
-  usagePanel.innerHTML = snapshot.usage.map(usageCard).join("");
+  // Rebuilding unchanged cards would swallow a click on Sign in that spans a refresh.
+  const html = snapshot.usage.map(usageCard).join("");
+  if (html !== usageHtml) usagePanel.innerHTML = usageHtml = html;
   if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
   const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
@@ -330,13 +334,19 @@ function renderHistory() {
     (history.map(historyCard).join("") || `<p class="empty">Usage history appears once usage is checked.</p>`);
 }
 
+let historyRequest = 0;
+
 async function loadHistory() {
   if (historyPanel.hidden && !wide.matches) return;
-  history = await invoke<ProviderHistory[]>("get_history", {
+  // Only the latest request may draw, so a slow reply for the other view can't win.
+  const request = ++historyRequest;
+  const loaded = await invoke<ProviderHistory[]>("get_history", {
     utcOffsetMinutes: -new Date().getTimezoneOffset(),
     days: wide.matches ? 30 : 14,
     weeks: wide.matches ? 12 : 8,
   });
+  if (request !== historyRequest) return;
+  history = loaded;
   renderHistory();
 }
 
@@ -384,13 +394,22 @@ for (const tab of tabs) {
   });
 }
 
-listen<Snapshot>("snapshot", (event) => {
-  snapshot = event.payload;
+function applySnapshot(next: Snapshot) {
+  // History lists the providers usage was checked for, so load it once the first check lands.
+  const firstUsage = !snapshot?.usage.length && next.usage.length > 0;
+  snapshot = next;
   render();
+  if (firstUsage) loadHistory();
+}
+
+let gotEvent = false;
+listen<Snapshot>("snapshot", (event) => {
+  gotEvent = true;
+  applySnapshot(event.payload);
 });
 invoke<Snapshot>("get_snapshot").then((s) => {
-  snapshot = s;
-  render();
+  // A snapshot event that arrived first is newer than this reply.
+  if (!gotEvent) applySnapshot(s);
 });
 // Relative times drift between snapshots, so redraw on a timer too.
 setInterval(render, 30_000);
