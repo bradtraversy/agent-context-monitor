@@ -15,6 +15,7 @@ dependencies = [
  "chrono",
  "gtk",
  "libc",
+ "memchr",
  "serde",
  "serde_json",
  "sha2",
