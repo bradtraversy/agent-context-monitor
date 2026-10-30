@@ -43,10 +43,24 @@ fn search_dirs() -> Vec<PathBuf> {
         let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
             .map(|entries| entries.flatten().map(|e| e.path().join("bin")).collect())
             .unwrap_or_default();
-        nvm.sort();
+        nvm.sort_by_key(|bin| node_version(bin));
         dirs.extend(nvm.into_iter().rev());
     }
     dirs
+}
+
+/// `v22.10.0` from nvm's `.../v22.10.0/bin`, as numbers so it sorts after `v22.9.0`.
+fn node_version(bin: &Path) -> Vec<u64> {
+    bin.parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        .map(|n| {
+            n.trim_start_matches('v')
+                .split('.')
+                .map(|part| part.parse().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Runs `program` with `args` in a new terminal window that stays open afterwards.
@@ -142,6 +156,20 @@ fn spawn(command: &mut Command) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_versions_sort_as_numbers() {
+        let mut bins: Vec<PathBuf> = ["v22.10.0", "v22.9.0", "v8.1.0"]
+            .iter()
+            .map(|v| PathBuf::from("/n").join(v).join("bin"))
+            .collect();
+        bins.sort_by_key(|bin| node_version(bin));
+        let names: Vec<_> = bins
+            .iter()
+            .map(|b| b.parent().unwrap().file_name().unwrap())
+            .collect();
+        assert_eq!(names, ["v8.1.0", "v22.9.0", "v22.10.0"]);
+    }
 
     #[test]
     fn script_quotes_the_program_path() {
