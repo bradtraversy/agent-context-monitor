@@ -25,9 +25,10 @@ use crate::model::{
 const PROVIDER: &str = "claude";
 const ONE_MILLION: u64 = 1_000_000;
 const TWO_HUNDRED_K: u64 = 200_000;
-/// Used when liveness cannot be checked against the process table.
+/// Without Linux's process start times, a pid could belong to a newer process, so a
+/// registry entry not updated for this long is taken as left behind.
 #[cfg(not(target_os = "linux"))]
-const REGISTRY_FRESHNESS_SECS: i64 = 30 * 60;
+const REGISTRY_FRESHNESS_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Deserialize)]
 struct RegistryEntry {
@@ -207,7 +208,10 @@ impl ClaudeSessions {
             }
             let id = id.clone();
             let mut transcript = self.transcripts.remove(&id).unwrap_or_default();
-            transcript.read_new(path);
+            // Deleted since the last folder search.
+            if !transcript.read_new(path) {
+                continue;
+            }
             chats.push(ChatContext {
                 provider: PROVIDER,
                 title: desktop
@@ -421,9 +425,41 @@ fn is_alive(entry: &RegistryEntry, _now: SystemTime) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn is_alive(entry: &RegistryEntry, now: SystemTime) -> bool {
+    // A session that crashed leaves its entry behind, so its process must still run.
     entry
         .updated_at_ms
         .is_some_and(|ms| unix_secs(now) - ms / 1000 <= REGISTRY_FRESHNESS_SECS)
+        && process_running(entry.pid)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 only checks; a process owned by someone else answers EPERM.
+    // SAFETY: kill with signal 0 sends nothing and touches no memory.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the handle is checked before use and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
 }
 
 /// Claude stores each transcript as `projects/<encoded cwd>/<session id>.jsonl`.

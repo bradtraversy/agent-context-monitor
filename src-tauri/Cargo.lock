@@ -14,6 +14,7 @@ version = "0.1.2"
 dependencies = [
  "chrono",
  "gtk",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -23,6 +24,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
