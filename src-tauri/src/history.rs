@@ -145,7 +145,7 @@ pub fn load(
     path: &PathBuf,
     providers: &[(String, String)],
     now: SystemTime,
-    utc_offset_secs: i64,
+    offset_at: &dyn Fn(i64) -> i64,
     days: usize,
     weeks: usize,
 ) -> Vec<ProviderHistory> {
@@ -161,7 +161,7 @@ pub fn load(
             ProviderHistory {
                 provider: provider.clone(),
                 name: name.clone(),
-                daily: daily(&mine, unix_secs(now), utc_offset_secs, days),
+                daily: daily(&mine, unix_secs(now), offset_at, days),
                 weekly: weekly(&mine, unix_secs(now), weeks),
             }
         })
@@ -169,8 +169,9 @@ pub fn load(
 }
 
 /// Share of the weekly limit used on each local day, from the rise between readings.
-fn daily(samples: &[&Sample], now: i64, offset: i64, days: usize) -> Vec<Bar> {
-    let day_of = |t: i64| (t + offset).div_euclid(DAY);
+/// `offset_at` gives the local UTC offset at a time, which daylight saving changes.
+fn daily(samples: &[&Sample], now: i64, offset_at: &dyn Fn(i64) -> i64, days: usize) -> Vec<Bar> {
+    let day_of = |t: i64| (t + offset_at(t)).div_euclid(DAY);
     let today = day_of(now);
     let first_day = samples.first().map(|s| day_of(s.t));
     let mut used: HashMap<i64, f64> = HashMap::new();
@@ -186,7 +187,7 @@ fn daily(samples: &[&Sample], now: i64, offset: i64, days: usize) -> Vec<Bar> {
     }
     (today - days as i64 + 1..=today)
         .map(|day| Bar {
-            start: day * DAY - offset,
+            start: day * DAY - offset_at(day * DAY),
             used: first_day
                 .filter(|first| day >= *first)
                 .map(|_| used.get(&day).copied().unwrap_or(0.0)),
@@ -279,7 +280,7 @@ mod tests {
             sample(NOW + 30, 4.0, next_reset),
         ];
         let refs: Vec<&Sample> = samples.iter().collect();
-        let bars = daily(&refs, NOW + 60, 0, 14);
+        let bars = daily(&refs, NOW + 60, &|_| 0, 14);
         assert_eq!(bars.len(), 14);
         let used: Vec<Option<f64>> = bars.iter().rev().take(4).map(|b| b.used).collect();
         assert_eq!(used, vec![Some(4.0), Some(6.5), Some(5.0), None]);
@@ -295,10 +296,28 @@ mod tests {
             sample(NOW - 3600, 15.0, reset),
         ];
         let refs: Vec<&Sample> = samples.iter().collect();
-        let utc = daily(&refs, NOW + 3600, 0, 14);
-        let new_york = daily(&refs, NOW + 3600, -4 * 3600, 14);
+        let utc = daily(&refs, NOW + 3600, &|_| 0, 14);
+        let new_york = daily(&refs, NOW + 3600, &|_| -4 * 3600, 14);
         assert_eq!(utc[12].used, Some(5.0));
         assert_eq!(new_york[13].used, Some(5.0));
+    }
+
+    #[test]
+    fn days_before_a_clock_change_keep_their_own_offset() {
+        // New York moves from -4h to -5h a day before NOW.
+        let switch = NOW - DAY;
+        let offset_at = |t: i64| if t < switch { -4 * 3600 } else { -5 * 3600 };
+        let reset = NOW + 3 * DAY;
+        // 00:30 local, two days before NOW, while still on -4h.
+        let early = NOW - 2 * DAY + 4 * 3600 + 1800;
+        let samples = [
+            sample(early - 7200, 10.0, reset),
+            sample(early, 15.0, reset),
+        ];
+        let refs: Vec<&Sample> = samples.iter().collect();
+        let bars = daily(&refs, NOW, &offset_at, 14);
+        let day = bars.iter().find(|b| b.used == Some(5.0)).unwrap();
+        assert_eq!(day.start, NOW - 2 * DAY + 4 * 3600);
     }
 
     #[test]
@@ -329,7 +348,7 @@ mod tests {
         fs::write(&path, text).unwrap();
         let now = UNIX_EPOCH + Duration::from_secs(NOW as u64);
         let providers = [("claude".to_string(), "Claude".to_string())];
-        let history = load(&path, &providers, now, 0, 14, 8);
+        let history = load(&path, &providers, now, &|_| 0, 14, 8);
         assert_eq!(history[0].daily.len(), 14);
         assert_eq!(history[0].weekly.len(), 8);
         let _ = fs::remove_dir_all(dir);

@@ -60,7 +60,14 @@ fn get_history(
         &file.0,
         &providers,
         SystemTime::now(),
-        utc_offset_minutes * 60,
+        &|t| {
+            use chrono::TimeZone;
+            chrono::Local
+                .timestamp_opt(t, 0)
+                .single()
+                .map(|d| i64::from(d.offset().local_minus_utc()))
+                .unwrap_or(utc_offset_minutes * 60)
+        },
         days,
         weeks,
     )
