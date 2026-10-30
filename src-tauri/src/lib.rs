@@ -27,13 +27,15 @@ fn get_snapshot(state: tauri::State<SharedSnapshot>) -> Snapshot {
     state.0.lock().unwrap().clone()
 }
 
-#[tauri::command]
+// Off the window's thread: it reads or writes files.
+#[tauri::command(async)]
 fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
 }
 
 /// Starts signing in to a provider whose usage card asked for it.
-#[tauri::command]
+// Off the window's thread: it reads or writes files.
+#[tauri::command(async)]
 fn sign_in(provider: String) -> Result<(), String> {
     match provider.as_str() {
         "claude" => claude::sign_in(),
@@ -41,7 +43,8 @@ fn sign_in(provider: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+// Off the window's thread: it reads or writes files.
+#[tauri::command(async)]
 fn get_history(
     snapshot: tauri::State<SharedSnapshot>,
     file: tauri::State<HistoryFile>,
