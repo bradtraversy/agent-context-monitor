@@ -114,7 +114,9 @@ impl ProviderUsage {
             .as_deref()
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.timestamp());
-        self.stale = observed.is_some_and(|t| unix_secs(now) - t > USAGE_STALE_AFTER_SECS);
+        // A time that can't be read can't be shown to be fresh either.
+        self.stale = self.observed_at.is_some()
+            && observed.is_none_or(|t| unix_secs(now) - t > USAGE_STALE_AFTER_SECS);
         self
     }
 
@@ -283,6 +285,9 @@ mod tests {
         let old = usage.with_staleness(at(observed + 21 * 60 * 60));
         assert!(old.stale);
         assert_eq!(old.level(), Level::Unknown);
+        let mut undated = old.clone();
+        undated.observed_at = Some(String::new());
+        assert!(undated.with_staleness(at(observed)).stale);
     }
 
     #[test]
