@@ -4,6 +4,7 @@ mod claude_desktop;
 mod claude_sessions;
 mod codex;
 mod codex_live;
+mod files;
 mod history;
 mod jsonl;
 mod model;

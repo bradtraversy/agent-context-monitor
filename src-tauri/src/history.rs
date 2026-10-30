@@ -45,7 +45,7 @@ impl Recorder {
         samples.retain(|s| s.t >= cutoff);
         if samples.len() < before {
             let text: String = samples.iter().map(line).collect();
-            let _ = fs::write(&path, text);
+            let _ = crate::files::replace(&path, text.as_bytes());
         }
         let mut last = HashMap::new();
         for s in samples {

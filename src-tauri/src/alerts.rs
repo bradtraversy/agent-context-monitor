@@ -53,7 +53,7 @@ impl Alerts {
             let _ = fs::create_dir_all(dir);
         }
         if let Ok(json) = serde_json::to_vec(&self.sent) {
-            let _ = fs::write(path, json);
+            let _ = crate::files::replace(path, &json);
         }
     }
 

@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
+use crate::files;
 use crate::model::{LimitWindow, ProviderUsage, UsageAction, UsageStatus, unix_secs};
 use crate::programs;
 
@@ -220,7 +221,7 @@ impl ClaudeSource {
     fn can_write_store(&self, store: Store) -> bool {
         match store {
             Store::File => {
-                let probe = private_tmp_path(&self.credentials_path);
+                let probe = files::tmp_path(&self.credentials_path);
                 let ok = std::fs::File::create(&probe).is_ok();
                 let _ = std::fs::remove_file(&probe);
                 ok
@@ -231,7 +232,7 @@ impl ClaudeSource {
 
     fn write_store(&self, store: Store, contents: &[u8]) -> bool {
         match store {
-            Store::File => write_private(&self.credentials_path, contents).is_ok(),
+            Store::File => files::replace(&self.credentials_path, contents).is_ok(),
             Store::Keychain => save_keychain_credentials(contents),
         }
     }
@@ -469,28 +470,6 @@ fn apply_tokens(raw: &[u8], tokens: &TokenResponse, now_ms: i64) -> Option<Vec<u
         oauth.insert("scopes".into(), scopes.into());
     }
     serde_json::to_vec(&creds).ok()
-}
-
-/// Replaces the file in one step, readable only by its owner.
-fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = private_tmp_path(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let result = options
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(contents).and_then(|_| f.sync_all()))
-        .and_then(|_| std::fs::rename(&tmp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-fn private_tmp_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("json.acm-{}", std::process::id()))
 }
 
 /// Claude Code's OAuth refresh lock: the `.oauth_refresh.lock` directory in its
