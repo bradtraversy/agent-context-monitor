@@ -1,6 +1,6 @@
 [package]
 name = "agent-context-monitor"
-version = "0.1.1"
+version = "0.1.2"
 description = "Tray app showing Claude Code and Codex usage and context left"
 authors = ["Brad Traversy"]
 license = "MIT"
