@@ -107,6 +107,8 @@ pub struct ClaudeSource {
     /// sign-in can be picked up right away.
     failed_login: Option<u64>,
     can_sign_in: bool,
+    /// Whether to look in the macOS Keychain, where Claude Code keeps its live login.
+    keychain: bool,
 }
 
 impl ClaudeSource {
@@ -118,6 +120,7 @@ impl ClaudeSource {
             problem: None,
             failed_login: None,
             can_sign_in: false,
+            keychain: cfg!(target_os = "macos"),
         }
     }
 
@@ -156,17 +159,41 @@ impl ClaudeSource {
         }
     }
 
+    /// On macOS the Keychain comes first: Claude Code uses the file there only when the
+    /// Keychain fails, so a file left over from that can hold an old login.
     fn read_login(&self) -> Option<(Vec<u8>, Store)> {
-        match std::fs::read(&self.credentials_path) {
-            Ok(raw) => Some((raw, Store::File)),
-            Err(_) => keychain_credentials().map(|raw| (raw, Store::Keychain)),
-        }
+        let from_keychain = || {
+            self.keychain
+                .then(keychain_credentials)
+                .flatten()
+                .map(|raw| (raw, Store::Keychain))
+        };
+        from_keychain().or_else(|| {
+            std::fs::read(&self.credentials_path)
+                .ok()
+                .map(|raw| (raw, Store::File))
+        })
     }
 
     fn read_store(&self, store: Store) -> Option<Vec<u8>> {
         match store {
             Store::File => std::fs::read(&self.credentials_path).ok(),
             Store::Keychain => keychain_credentials(),
+        }
+    }
+
+    /// Whether renewed tokens could be saved. Checked before renewing, because once
+    /// Claude hands out new tokens the old refresh token stops working, and losing the
+    /// new ones would sign Claude Code out too.
+    fn can_write_store(&self, store: Store) -> bool {
+        match store {
+            Store::File => {
+                let probe = private_tmp_path(&self.credentials_path);
+                let ok = std::fs::File::create(&probe).is_ok();
+                let _ = std::fs::remove_file(&probe);
+                ok
+            }
+            Store::Keychain => keychain_item_account().is_some(),
         }
     }
 
@@ -247,6 +274,11 @@ impl ClaudeSource {
         if !oauth.expires_within(now_ms, RENEW_AHEAD_MS) {
             return Ok(oauth);
         }
+        if !self.can_write_store(store) {
+            return Err(Failure::Request(
+                "Couldn't save a renewed Claude login, so it wasn't renewed.".into(),
+            ));
+        }
         let refresh_token = oauth
             .refresh_token
             .as_deref()
@@ -286,7 +318,14 @@ impl ClaudeSource {
 
         let updated = apply_tokens(&raw, &tokens, now_ms)
             .ok_or_else(|| Failure::Request("Claude's saved login was not readable.".into()))?;
-        if !self.write_store(store, &updated) {
+        // The old refresh token is spent now, so try hard to keep the new one.
+        let saved = (0..3).any(|attempt| {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            self.write_store(store, &updated)
+        });
+        if !saved {
             return Err(Failure::Request(
                 "Couldn't save Claude's renewed login.".into(),
             ));
@@ -403,7 +442,7 @@ fn apply_tokens(raw: &[u8], tokens: &TokenResponse, now_ms: i64) -> Option<Vec<u
 /// Replaces the file in one step, readable only by its owner.
 fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension(format!("json.acm-{}", std::process::id()));
+    let tmp = private_tmp_path(path);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -416,6 +455,10 @@ fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+fn private_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("json.acm-{}", std::process::id()))
 }
 
 /// Claude Code's OAuth refresh lock: the `.oauth_refresh.lock` directory in its
@@ -505,9 +548,7 @@ fn keychain_credentials() -> Option<Vec<u8>> {
 /// reads it back to be sure it took.
 #[cfg(target_os = "macos")]
 fn save_keychain_credentials(contents: &[u8]) -> bool {
-    let Some(account) = security(&["find-generic-password", "-s", KEYCHAIN_SERVICE], None)
-        .and_then(|attrs| keychain_account(&String::from_utf8_lossy(&attrs)))
-    else {
+    let Some(account) = keychain_item_account() else {
         return false;
     };
     let hex: String = contents.iter().map(|b| format!("{b:02x}")).collect();
@@ -532,6 +573,18 @@ fn save_keychain_credentials(contents: &[u8]) -> bool {
         )
     };
     saved.is_some() && keychain_credentials().is_some_and(|raw| raw == contents)
+}
+
+/// The account name on Claude Code's Keychain item, needed to update it.
+#[cfg(target_os = "macos")]
+fn keychain_item_account() -> Option<String> {
+    security(&["find-generic-password", "-s", KEYCHAIN_SERVICE], None)
+        .and_then(|attrs| keychain_account(&String::from_utf8_lossy(&attrs)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_item_account() -> Option<String> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -669,6 +722,7 @@ mod tests {
     #[test]
     fn missing_login_is_unknown_with_a_hint() {
         let mut source = ClaudeSource::new(PathBuf::from("/nonexistent-acm-test"));
+        source.keychain = false; // Keep a developer's own Mac login out of the test.
         source.refresh(SystemTime::now());
         let usage = source.usage(SystemTime::now());
         assert_eq!(usage.status, UsageStatus::Unknown);
@@ -687,6 +741,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("acm-claude-login-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let mut source = ClaudeSource::new(home.clone());
+        source.keychain = false;
         assert!(!source.login_changed());
         // No token is expired-only, so this fails without a network request.
         std::fs::write(home.join(".credentials.json"), r#"{"claudeAiOauth":{}}"#).unwrap();
