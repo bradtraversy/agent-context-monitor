@@ -49,6 +49,7 @@ interface Snapshot {
   chats: ChatContext[];
   level: Level;
   context_limit: number | null;
+  thresholds: { warning: number; critical: number };
 }
 
 interface Bar {
@@ -66,8 +67,6 @@ interface ProviderHistory {
 
 type Range = "daily" | "weekly";
 
-const WARNING = 70;
-const CRITICAL = 90;
 
 const usagePanel = document.querySelector<HTMLElement>("#panel-usage")!;
 const chatList = document.querySelector<HTMLElement>("#chat-list")!;
@@ -91,9 +90,11 @@ let snapshot: Snapshot | null = null;
 // Why the last Sign in click couldn't open a terminal, by provider.
 const signInErrors = new Map<string, string>();
 
+// The same thresholds as the tray and alerts, which the app sends with each snapshot.
 function levelFor(used: number): Level {
-  if (used >= CRITICAL) return "critical";
-  if (used >= WARNING) return "warning";
+  const { warning, critical } = snapshot?.thresholds ?? { warning: 70, critical: 90 };
+  if (used >= critical) return "critical";
+  if (used >= warning) return "warning";
   return "ok";
 }
 

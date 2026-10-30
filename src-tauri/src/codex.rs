@@ -16,7 +16,7 @@ use crate::jsonl::{collect_jsonl, contains, project_label, read_lines_from, resc
 
 use crate::model::{
     ChatContext, Confidence, ContextMeasure, LimitWindow, ProviderUsage, RECENT_CHAT_SECS,
-    UsageStatus, unix_secs,
+    unix_secs,
 };
 
 const PROVIDER: &str = "codex";
@@ -338,34 +338,17 @@ fn usage_from_reading(reading: &RateReading, now: i64) -> ProviderUsage {
                 w.window_minutes
                     .is_some_and(|m| (m <= SESSION_WINDOW_MAX_MINUTES) == is_session)
             })
-            .map(|w| match w.resets_at {
-                Some(reset) if reset <= now => LimitWindow::ResetSinceReading { resets_at: reset },
-                resets_at => LimitWindow::Reported {
-                    used_percent: w.used_percent.clamp(0.0, 100.0),
-                    resets_at,
-                },
-            })
+            .map(|w| LimitWindow::from_reading(w.used_percent, w.resets_at, now))
             .unwrap_or(LimitWindow::NotReported)
     };
-    let session = pick(true);
-    let weekly = pick(false);
-    let empty = session == LimitWindow::NotReported && weekly == LimitWindow::NotReported;
-    ProviderUsage {
-        provider: PROVIDER,
-        name: NAME,
-        status: if empty {
-            UsageStatus::Unknown
-        } else {
-            UsageStatus::Available
-        },
-        note: empty.then(|| "Codex's latest reading had no limits.".to_string()),
-        plan: reading.plan.clone(),
-        observed_at: Some(reading.observed_at.clone()),
-        session,
-        weekly,
-        stale: false,
-        action: None,
-    }
+    ProviderUsage::from_reading(
+        PROVIDER,
+        NAME,
+        (pick(true), pick(false)),
+        reading.plan.clone(),
+        reading.observed_at.clone(),
+        "Codex's latest reading had no limits.",
+    )
 }
 
 fn parent_thread_id(source: &serde_json::Value) -> Option<String> {
@@ -378,6 +361,7 @@ fn parent_thread_id(source: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::UsageStatus;
     use std::time::UNIX_EPOCH;
 
     const SENTINEL: &str = "SENTINEL-PRIVATE-PROMPT-7731";

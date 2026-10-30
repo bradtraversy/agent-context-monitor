@@ -43,6 +43,18 @@ pub enum LimitWindow {
 }
 
 impl LimitWindow {
+    /// A reading's window as of `now`. Once its reset time has passed, the reading no
+    /// longer says how much is used.
+    pub fn from_reading(used_percent: f64, resets_at: Option<i64>, now: i64) -> LimitWindow {
+        match resets_at {
+            Some(reset) if reset <= now => LimitWindow::ResetSinceReading { resets_at: reset },
+            resets_at => LimitWindow::Reported {
+                used_percent: used_percent.clamp(0.0, 100.0),
+                resets_at,
+            },
+        }
+    }
+
     pub fn level(&self) -> Level {
         match self {
             LimitWindow::Reported { used_percent, .. } => Level::from_used_percent(*used_percent),
@@ -93,6 +105,36 @@ pub const RECENT_CHAT_SECS: i64 = 24 * 60 * 60;
 pub const TRAY_CHAT_SECS: i64 = 30 * 60;
 
 impl ProviderUsage {
+    /// Usage from a provider's reading. A reading with neither limit is Unknown, with
+    /// `empty_note` saying so.
+    pub fn from_reading(
+        provider: &'static str,
+        name: &'static str,
+        windows: (LimitWindow, LimitWindow),
+        plan: Option<String>,
+        observed_at: String,
+        empty_note: &str,
+    ) -> Self {
+        let (session, weekly) = windows;
+        let empty = session == LimitWindow::NotReported && weekly == LimitWindow::NotReported;
+        ProviderUsage {
+            provider,
+            name,
+            status: if empty {
+                UsageStatus::Unknown
+            } else {
+                UsageStatus::Available
+            },
+            note: empty.then(|| empty_note.to_string()),
+            plan,
+            observed_at: Some(observed_at),
+            session,
+            weekly,
+            stale: false,
+            action: None,
+        }
+    }
+
     pub fn unknown(provider: &'static str, name: &'static str, note: impl Into<String>) -> Self {
         ProviderUsage {
             provider,
@@ -198,6 +240,23 @@ pub struct Snapshot {
     pub level: Level,
     /// The user's context limit in tokens, if set.
     pub context_limit: Option<u64>,
+    /// Sent so the window colors bars at the same points as the tray and alerts.
+    pub thresholds: Thresholds,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Thresholds {
+    pub warning: f64,
+    pub critical: f64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Thresholds {
+            warning: WARNING_PERCENT,
+            critical: CRITICAL_PERCENT,
+        }
+    }
 }
 
 impl Snapshot {
@@ -218,6 +277,7 @@ impl Snapshot {
             chats,
             level,
             context_limit: None,
+            thresholds: Thresholds::default(),
         }
     }
 

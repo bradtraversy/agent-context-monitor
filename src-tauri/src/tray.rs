@@ -67,11 +67,27 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The level and tooltip last shown, so chat-only changes don't redraw the icon.
+static SHOWN: Mutex<Option<(Level, String)>> = Mutex::new(None);
+
 pub fn update(app: &AppHandle, snapshot: &Snapshot) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let tooltip = snapshot.tooltip();
+    let mut shown = SHOWN.lock().unwrap();
+    let (level_changed, tooltip_changed) = match &*shown {
+        Some((level, text)) => (*level != snapshot.level, *text != tooltip),
+        None => (true, true),
+    };
+    // Linux tray hosts load each new icon from a file, so it's only set on a change.
+    if level_changed {
         let _ = tray.set_icon(Some(icon(snapshot.level)));
-        let _ = tray.set_tooltip(Some(snapshot.tooltip()));
     }
+    if tooltip_changed {
+        let _ = tray.set_tooltip(Some(&tooltip));
+    }
+    *shown = Some((snapshot.level, tooltip));
 }
 
 pub fn show_window(app: &AppHandle) {

@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
@@ -53,13 +53,31 @@ impl DesktopChats {
         }
     }
 
-    /// Records are only parsed again when they change, since the folder holds every
-    /// chat ever.
-    pub fn read(&mut self) -> Desktop {
-        let mut entries = HashMap::with_capacity(self.entries.len());
-        for path in records(&self.dir) {
-            let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
-            let entry = match self.entries.remove(&path) {
+    /// The folder holds every chat ever, so it is only searched when `search` is set.
+    /// In between, only records changed lately are looked at again, since those are
+    /// the chats in use. Records are only parsed again when they change.
+    pub fn read(&mut self, search: bool, now: SystemTime) -> Desktop {
+        let paths = if search {
+            records(&self.dir)
+        } else {
+            self.entries
+                .iter()
+                .filter(|(_, e)| changed_lately(e, now))
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
+        let mut entries = if search {
+            HashMap::with_capacity(self.entries.len())
+        } else {
+            std::mem::take(&mut self.entries)
+        };
+        for path in paths {
+            let Ok(meta) = fs::metadata(&path) else {
+                entries.remove(&path);
+                continue;
+            };
+            let modified = meta.modified().ok();
+            let entry = match self.entries.remove(&path).or_else(|| entries.remove(&path)) {
                 Some(entry) if entry.modified.is_some() && entry.modified == modified => entry,
                 _ => fs::read(&path)
                     .ok()
@@ -87,6 +105,16 @@ impl DesktopChats {
                 .collect(),
         }
     }
+}
+
+/// Records changed within this long are checked on every read, not just on a search.
+const LATELY: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn changed_lately(entry: &Entry, now: SystemTime) -> bool {
+    entry
+        .modified
+        .and_then(|m| now.duration_since(m).ok())
+        .is_none_or(|age| age <= LATELY)
 }
 
 /// Chats started from a project all get this placeholder, so it names nothing.
@@ -158,14 +186,22 @@ mod tests {
         .unwrap();
         fs::write(org.join("deleted_d"), "x").unwrap();
         let mut desktop = DesktopChats::new(dir.clone());
-        let read = desktop.read();
+        let now = SystemTime::now();
+        let read = desktop.read(true, now);
         let mut hidden: Vec<&str> = read.hidden.iter().map(String::as_str).collect();
         hidden.sort();
         assert_eq!(hidden, ["gone", "gone-old", "old", "older"]);
         assert_eq!(read.titles.get("now").map(String::as_str), Some("Sheetbug"));
         assert!(!read.titles.contains_key("thread"));
-        assert!(desktop.read().hidden.contains("old"));
+        assert!(desktop.read(false, now).hidden.contains("old"));
+        // Without a search, a recently changed record is still looked at again.
+        fs::write(
+            org.join("local_b.json"),
+            r#"{"cliSessionId":"gone","isArchived":false}"#,
+        )
+        .unwrap();
+        assert!(!desktop.read(false, now).hidden.contains("gone"));
         fs::remove_dir_all(&dir).unwrap();
-        assert!(desktop.read().hidden.is_empty());
+        assert!(desktop.read(false, now).hidden.is_empty());
     }
 }

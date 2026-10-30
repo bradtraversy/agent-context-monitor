@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 
 use crate::files;
-use crate::model::{LimitWindow, ProviderUsage, UsageAction, UsageStatus, unix_secs};
+use crate::model::{LimitWindow, ProviderUsage, UsageAction, unix_secs};
 use crate::programs;
 
 const PROVIDER: &str = "claude";
@@ -379,38 +379,22 @@ impl ClaudeSource {
             return usage;
         };
         let now = unix_secs(now);
-        let to_window = |w: Option<(f64, Option<i64>)>| match w {
-            None => LimitWindow::NotReported,
-            Some((_, Some(reset))) if reset <= now => {
-                LimitWindow::ResetSinceReading { resets_at: reset }
-            }
-            Some((used, resets_at)) => LimitWindow::Reported {
-                used_percent: used,
-                resets_at,
-            },
+        let to_window = |w: Option<(f64, Option<i64>)>| {
+            w.map_or(LimitWindow::NotReported, |(used, reset)| {
+                LimitWindow::from_reading(used, reset, now)
+            })
         };
-        let session = to_window(reading.session);
-        let weekly = to_window(reading.weekly);
-        let empty = session == LimitWindow::NotReported && weekly == LimitWindow::NotReported;
-        ProviderUsage {
-            provider: PROVIDER,
-            name: NAME,
-            status: if empty {
-                UsageStatus::Unknown
-            } else {
-                UsageStatus::Available
-            },
-            note: self
-                .problem
-                .clone()
-                .or_else(|| empty.then(|| "Claude reported no plan limits.".into())),
-            plan: reading.plan.clone(),
-            observed_at: Some(reading.fetched_at.clone()),
-            session,
-            weekly,
-            stale: false,
-            action: None,
-        }
+        let mut usage = ProviderUsage::from_reading(
+            PROVIDER,
+            NAME,
+            (to_window(reading.session), to_window(reading.weekly)),
+            reading.plan.clone(),
+            reading.fetched_at.clone(),
+            "Claude reported no plan limits.",
+        );
+        // A failed check leaves the last reading up, with the problem beside it.
+        usage.note = self.problem.clone().or(usage.note);
+        usage
     }
 }
 
@@ -649,6 +633,7 @@ fn rfc3339_now(now: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::UsageStatus;
 
     #[test]
     fn parses_usage_windows_and_reset_times() {

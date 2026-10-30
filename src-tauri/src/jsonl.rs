@@ -96,7 +96,7 @@ pub fn consume_lines(chunk: &[u8], mut f: impl FnMut(&[u8])) -> u64 {
 }
 
 pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
+    memchr::memmem::find(haystack, needle).is_some()
 }
 
 #[cfg(test)]
