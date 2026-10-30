@@ -168,38 +168,8 @@ impl ClaudeSessions {
             {
                 transcript.path = None;
             }
-            chats.push(ChatContext {
-                provider: PROVIDER,
-                title: desktop
-                    .titles
-                    .get(&entry.session_id)
-                    .cloned()
-                    .or_else(|| {
-                        entry.name.clone().filter(|n| {
-                            !n.trim().is_empty()
-                                && n != PLACEHOLDER_TITLE
-                                && entry.name_source.as_deref() != Some("derived")
-                        })
-                    })
-                    .or_else(|| transcript.title()),
-                surface: entry.entrypoint.as_deref().map(surface_label),
-                project: entry.cwd.as_deref().and_then(project_label),
-                cwd: entry.cwd.clone(),
-                model: transcript.model.clone(),
-                context: transcript.context.clone(),
-                last_activity: transcript
-                    .modified
-                    .map(unix_secs)
-                    .or(entry.updated_at_ms.map(|ms| ms / 1000))
-                    .unwrap_or(0),
-                subagents: 0,
-                activity: match entry.status.as_deref() {
-                    Some("busy") => Some(Activity::Working),
-                    Some("idle") => Some(Activity::Idle),
-                    _ => None,
-                },
-                id: entry.session_id.clone(),
-            });
+            let title = desktop.titles.get(&entry.session_id).cloned();
+            chats.push(transcript.chat(&entry.session_id, title, Some(&entry)));
             transcripts.insert(entry.session_id, transcript);
         }
         for (id, path) in &self.recent {
@@ -212,24 +182,8 @@ impl ClaudeSessions {
             if !transcript.read_new(path) {
                 continue;
             }
-            chats.push(ChatContext {
-                provider: PROVIDER,
-                title: desktop
-                    .titles
-                    .get(&id)
-                    .cloned()
-                    .or_else(|| transcript.title()),
-                surface: transcript.entrypoint.as_deref().map(surface_label),
-                project: transcript.cwd.as_deref().and_then(project_label),
-                cwd: transcript.cwd.clone(),
-                model: transcript.model.clone(),
-                context: transcript.context.clone(),
-                last_activity: transcript.modified.map(unix_secs).unwrap_or(0),
-                subagents: 0,
-                // Not in the live list, so Claude Code isn't running it.
-                activity: Some(Activity::Idle),
-                id: id.clone(),
-            });
+            let title = desktop.titles.get(&id).cloned();
+            chats.push(transcript.chat(&id, title, None));
             transcripts.insert(id, transcript);
         }
         self.transcripts = transcripts;
@@ -283,6 +237,49 @@ impl Transcript {
             self.offset += read_lines_from(path, offset, |line| self.apply(line));
         }
         true
+    }
+
+    /// The chat as the Context tab shows it. A running session's registry entry knows
+    /// its folder, title and status; a closed chat has only its transcript.
+    fn chat(&self, id: &str, title: Option<String>, live: Option<&RegistryEntry>) -> ChatContext {
+        let registry_title = live.and_then(|e| {
+            e.name.clone().filter(|n| {
+                !n.trim().is_empty()
+                    && n != PLACEHOLDER_TITLE
+                    && e.name_source.as_deref() != Some("derived")
+            })
+        });
+        let cwd = live
+            .and_then(|e| e.cwd.clone())
+            .or_else(|| self.cwd.clone());
+        let entrypoint = live
+            .and_then(|e| e.entrypoint.as_deref())
+            .or(self.entrypoint.as_deref());
+        ChatContext {
+            provider: PROVIDER,
+            id: id.to_string(),
+            title: title.or(registry_title).or_else(|| self.title()),
+            surface: entrypoint.map(surface_label),
+            project: cwd.as_deref().and_then(project_label),
+            cwd,
+            model: self.model.clone(),
+            context: self.context.clone(),
+            last_activity: self
+                .modified
+                .map(unix_secs)
+                .or(live.and_then(|e| e.updated_at_ms).map(|ms| ms / 1000))
+                .unwrap_or(0),
+            subagents: 0,
+            activity: match live {
+                // Not in the live list, so Claude Code isn't running it.
+                None => Some(Activity::Idle),
+                Some(e) => match e.status.as_deref() {
+                    Some("busy") => Some(Activity::Working),
+                    Some("idle") => Some(Activity::Idle),
+                    _ => None,
+                },
+            },
+        }
     }
 
     fn title(&self) -> Option<String> {
