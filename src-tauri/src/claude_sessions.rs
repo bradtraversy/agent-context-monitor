@@ -226,7 +226,8 @@ impl ClaudeSessions {
                 context: transcript.context.clone(),
                 last_activity: transcript.modified.map(unix_secs).unwrap_or(0),
                 subagents: 0,
-                activity: None,
+                // Not in the live list, so Claude Code isn't running it.
+                activity: Some(Activity::Idle),
                 id: id.clone(),
             });
             transcripts.insert(id, transcript);
