@@ -135,9 +135,8 @@ function bar(used: number, level: Level): string {
 }
 
 function limitRow(label: string, window: LimitWindow): string {
-  if (window.state === "not_reported") {
-    return `<div class="limit muted"><div class="limit-head"><span>${label}</span><span>Not reported</span></div></div>`;
-  }
+  // A plan without this limit (e.g. Codex Pro has no 5-hour window) gets no row at all.
+  if (window.state === "not_reported") return "";
   if (window.state === "reset_since_reading") {
     return `<div class="limit muted">
       <div class="limit-head"><span>${label}</span><span>Reset, current value unknown</span></div>
