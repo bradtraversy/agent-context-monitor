@@ -240,6 +240,23 @@ pub struct Snapshot {
     pub level: Level,
     /// The user's context limit in tokens, if set.
     pub context_limit: Option<u64>,
+    /// Sent so the window colors bars at the same points as the tray and alerts.
+    pub thresholds: Thresholds,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Thresholds {
+    pub warning: f64,
+    pub critical: f64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Thresholds {
+            warning: WARNING_PERCENT,
+            critical: CRITICAL_PERCENT,
+        }
+    }
 }
 
 impl Snapshot {
@@ -260,6 +277,7 @@ impl Snapshot {
             chats,
             level,
             context_limit: None,
+            thresholds: Thresholds::default(),
         }
     }
 
