@@ -148,7 +148,7 @@ impl ClaudeSessions {
             self.last_scan = Some(now);
             self.recent = recent_transcripts(&self.projects_dir, now);
         }
-        let desktop = self.desktop.read();
+        let desktop = self.desktop.read(rescan, now);
         let hidden = &desktop.hidden;
         let mut live = live_sessions(&self.registry_dir, now);
         live.retain(|e| !hidden.contains(&e.session_id));
