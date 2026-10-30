@@ -2,11 +2,7 @@
 
 A small desktop app that lives in your tray and shows how much Claude Code and Codex usage you have left, plus how full the context is in each of your recent chats. It reads what's already on your computer and never stores your messages.
 
-<p align="center">
-  <img src="docs/screenshots/usage.png" alt="Usage view showing Claude and Codex session and weekly limits" width="300">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/context.png" alt="Context view showing how full each recent chat is" width="300">
-</p>
+![Usage, Context, and History tabs side by side](docs/screenshots/tabs.png)
 
 ## Install
 
