@@ -366,14 +366,18 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
 /// `claude-opus-5-5[1m]`. Other Claude models use the standard 200k window, unless
 /// the chat has already gone past it. Models that aren't Claude stay unknown.
 fn window_from_model(model: &str, used: u64) -> Option<u64> {
-    if model.ends_with("[1m]") || used > TWO_HUNDRED_K {
+    if model.ends_with("[1m]") {
         return Some(ONE_MILLION);
     }
-    let model = model.to_ascii_lowercase();
-    ["claude", "opus", "sonnet", "haiku"]
+    let lower = model.to_ascii_lowercase();
+    let claude = ["claude", "opus", "sonnet", "haiku"]
         .iter()
-        .any(|family| model.contains(family))
-        .then_some(TWO_HUNDRED_K)
+        .any(|family| lower.contains(family));
+    claude.then_some(if used > TWO_HUNDRED_K {
+        ONE_MILLION
+    } else {
+        TWO_HUNDRED_K
+    })
 }
 
 fn surface_label(entrypoint: &str) -> String {
@@ -491,6 +495,10 @@ mod tests {
             Some(TWO_HUNDRED_K)
         );
         assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
+        let big = read(&[assistant("some-other-model", 1, 299_999, "")])
+            .context
+            .unwrap();
+        assert_eq!(big.context_window, None);
         let unknown = window("some-future-model");
         assert_eq!(unknown.used_tokens, 1_000);
         assert_eq!(unknown.context_window, None);
