@@ -55,7 +55,7 @@ struct OAuth {
     expires_at_ms: Option<i64>,
     #[serde(rename = "subscriptionType")]
     subscription: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     scopes: Vec<String>,
     #[serde(rename = "clientId")]
     client_id: Option<String>,

@@ -74,11 +74,11 @@ struct Message {
 
 #[derive(Deserialize, Clone, Copy)]
 struct Counts {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     cache_creation_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     cache_read_input_tokens: u64,
 }
 
@@ -92,7 +92,7 @@ impl Counts {
 struct Usage {
     #[serde(flatten)]
     totals: Counts,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     iterations: Vec<Iteration>,
 }
 
@@ -526,6 +526,16 @@ mod tests {
         assert!(t.context.is_none());
         let t = read(&[assistant("claude-opus-5-5[1m]", 0, 0, "")]);
         assert!(t.context.is_none());
+    }
+
+    #[test]
+    fn null_counts_still_give_a_reading() {
+        let line = assistant("claude-opus-5-5[1m]", 10, 990, r#","iterations":null"#).replace(
+            r#""cache_creation_input_tokens":0"#,
+            r#""cache_creation_input_tokens":null"#,
+        );
+        let ctx = read(&[line]).context.unwrap();
+        assert_eq!(ctx.used_tokens, 1_000);
     }
 
     #[test]

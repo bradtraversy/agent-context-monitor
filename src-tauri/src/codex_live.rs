@@ -29,13 +29,14 @@ struct Response {
 #[serde(rename_all = "camelCase")]
 struct ReadResult {
     rate_limits: Option<Snapshot>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::jsonl::null_as_default")]
     rate_limits_by_limit_id: std::collections::HashMap<String, Snapshot>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
+    limit_id: Option<String>,
     primary: Option<Window>,
     secondary: Option<Window>,
     plan_type: Option<String>,
@@ -106,10 +107,11 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
 }
 
 fn reading_from(mut result: ReadResult, now: SystemTime) -> Option<RateReading> {
-    let snapshot = result
-        .rate_limits_by_limit_id
-        .remove("codex")
-        .or(result.rate_limits)?;
+    // The plain field holds whichever limit Codex picked, so only take it as Codex's
+    // own when it says so or doesn't say.
+    let snapshot = result.rate_limits_by_limit_id.remove("codex").or(result
+        .rate_limits
+        .filter(|s| s.limit_id.as_deref().is_none_or(|id| id == "codex")))?;
     let windows = [snapshot.primary, snapshot.secondary]
         .into_iter()
         .flatten()
@@ -171,5 +173,12 @@ mod tests {
             }]
         );
         assert_eq!(reading.observed_at, "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn another_limit_is_never_taken_for_codex() {
+        let line = r#"{"id":1,"result":{"rateLimits":{"limitId":"other","primary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1}},"rateLimitsByLimitId":null}}"#;
+        let resp: Response = serde_json::from_str(line).unwrap();
+        assert!(reading_from(resp.result.unwrap(), SystemTime::UNIX_EPOCH).is_none());
     }
 }

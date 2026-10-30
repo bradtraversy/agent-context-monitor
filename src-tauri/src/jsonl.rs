@@ -9,6 +9,17 @@ use std::time::{Duration, SystemTime};
 /// checked on every refresh, which is only one look per file.
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 
+/// For `#[serde(default, deserialize_with = "jsonl::null_as_default")]`: a field
+/// that is missing or `null` gets its default, where plain `default` rejects `null`
+/// and with it the whole record.
+pub fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(<Option<T> as serde::Deserialize>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Whether a folder search last done at `last` is due again.
 pub fn rescan_due(last: Option<SystemTime>, now: SystemTime) -> bool {
     last.is_none_or(|t| {
