@@ -15,7 +15,7 @@ use crate::jsonl::consume_lines;
 use crate::jsonl::{collect_jsonl, contains, project_label, read_lines_from, rescan_due};
 
 use crate::model::{
-    ChatContext, Confidence, ContextMeasure, LimitWindow, ProviderUsage, RECENT_CHAT_SECS,
+    ChatContext, Confidence, ContextMeasure, Limit, LimitWindow, ProviderUsage, RECENT_CHAT_SECS,
     unix_secs,
 };
 
@@ -344,7 +344,7 @@ fn usage_from_reading(reading: &RateReading, now: i64) -> ProviderUsage {
     ProviderUsage::from_reading(
         PROVIDER,
         NAME,
-        (pick(true), pick(false)),
+        vec![Limit::session(pick(true)), Limit::weekly(pick(false))],
         reading.plan.clone(),
         reading.observed_at.clone(),
         "Codex's latest reading had no limits.",
@@ -390,9 +390,9 @@ mod tests {
         let limits = r#"{"primary":{"used_percent":13.0,"window_minutes":10080,"resets_at":1792880374},"secondary":null,"plan_type":"pro"}"#;
         let f = file_from(&[token("2026-10-19T10:51:09Z", 10, 8, 2, limits)]);
         let usage = usage_from_reading(f.rate.as_ref().unwrap(), 1_792_000_000);
-        assert_eq!(usage.session, LimitWindow::NotReported);
+        assert_eq!(usage.limit("session"), None);
         assert_eq!(
-            usage.weekly,
+            usage.limit("weekly").cloned().unwrap(),
             LimitWindow::Reported {
                 used_percent: 13.0,
                 resets_at: Some(1792880374)
@@ -407,10 +407,10 @@ mod tests {
         let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, limits)]);
         let usage = usage_from_reading(f.rate.as_ref().unwrap(), 1_900_000_000);
         assert!(
-            matches!(usage.session, LimitWindow::Reported { used_percent, .. } if used_percent == 40.0)
+            matches!(usage.limit("session").unwrap(), LimitWindow::Reported { used_percent, .. } if *used_percent == 40.0)
         );
         assert!(
-            matches!(usage.weekly, LimitWindow::Reported { used_percent, .. } if used_percent == 75.0)
+            matches!(usage.limit("weekly").unwrap(), LimitWindow::Reported { used_percent, .. } if *used_percent == 75.0)
         );
     }
 
@@ -420,7 +420,7 @@ mod tests {
         let f = file_from(&[token("2026-07-01T00:00:00Z", 10, 8, 2, limits)]);
         let usage = usage_from_reading(f.rate.as_ref().unwrap(), 2000);
         assert_eq!(
-            usage.weekly,
+            usage.limit("weekly").cloned().unwrap(),
             LimitWindow::ResetSinceReading { resets_at: 1000 }
         );
     }
@@ -497,7 +497,7 @@ mod tests {
             }],
         };
         let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
-        let weekly = |usage: ProviderUsage| usage.weekly;
+        let weekly = |usage: ProviderUsage| usage.limit("weekly").cloned().unwrap();
         assert!(
             matches!(weekly(source.usage(now, Some(&live))), LimitWindow::Reported { used_percent, .. } if used_percent == 0.0)
         );

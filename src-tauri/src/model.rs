@@ -63,6 +63,48 @@ impl LimitWindow {
     }
 }
 
+/// One plan limit on a usage card, such as the weekly limit.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Limit {
+    /// Stable key that alerts and history use: "session", "weekly", "monthly", or another
+    /// one a provider adds.
+    pub id: &'static str,
+    /// Shown on the usage card.
+    pub label: &'static str,
+    /// Shown in the tray tooltip and alerts, such as "weekly".
+    pub short: &'static str,
+    pub window: LimitWindow,
+}
+
+impl Limit {
+    pub fn session(window: LimitWindow) -> Self {
+        Limit {
+            id: "session",
+            label: "Current session",
+            short: "session",
+            window,
+        }
+    }
+
+    pub fn weekly(window: LimitWindow) -> Self {
+        Limit {
+            id: "weekly",
+            label: "This week",
+            short: "weekly",
+            window,
+        }
+    }
+
+    pub fn monthly(window: LimitWindow) -> Self {
+        Limit {
+            id: "monthly",
+            label: "This month",
+            short: "monthly",
+            window,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageStatus {
@@ -86,8 +128,8 @@ pub struct ProviderUsage {
     pub plan: Option<String>,
     /// RFC 3339 time of the reading, as reported by the provider.
     pub observed_at: Option<String>,
-    pub session: LimitWindow,
-    pub weekly: LimitWindow,
+    /// The plan's limits that were reported, shortest first.
+    pub limits: Vec<Limit>,
     /// The reading is too old to trust as the current value.
     pub stale: bool,
     pub action: Option<UsageAction>,
@@ -105,18 +147,21 @@ pub const RECENT_CHAT_SECS: i64 = 24 * 60 * 60;
 pub const TRAY_CHAT_SECS: i64 = 30 * 60;
 
 impl ProviderUsage {
-    /// Usage from a provider's reading. A reading with neither limit is Unknown, with
-    /// `empty_note` saying so.
+    /// Usage from a provider's reading. Limits that weren't reported are left out, and a
+    /// reading with none is Unknown, with `empty_note` saying so.
     pub fn from_reading(
         provider: &'static str,
         name: &'static str,
-        windows: (LimitWindow, LimitWindow),
+        limits: Vec<Limit>,
         plan: Option<String>,
         observed_at: String,
         empty_note: &str,
     ) -> Self {
-        let (session, weekly) = windows;
-        let empty = session == LimitWindow::NotReported && weekly == LimitWindow::NotReported;
+        let limits: Vec<Limit> = limits
+            .into_iter()
+            .filter(|l| l.window != LimitWindow::NotReported)
+            .collect();
+        let empty = limits.is_empty();
         ProviderUsage {
             provider,
             name,
@@ -128,8 +173,7 @@ impl ProviderUsage {
             note: empty.then(|| empty_note.to_string()),
             plan,
             observed_at: Some(observed_at),
-            session,
-            weekly,
+            limits,
             stale: false,
             action: None,
         }
@@ -143,8 +187,7 @@ impl ProviderUsage {
             note: Some(note.into()),
             plan: None,
             observed_at: None,
-            session: LimitWindow::NotReported,
-            weekly: LimitWindow::NotReported,
+            limits: Vec::new(),
             stale: false,
             action: None,
         }
@@ -166,7 +209,15 @@ impl ProviderUsage {
         if self.stale {
             return Level::Unknown;
         }
-        self.session.level().max(self.weekly.level())
+        self.limits
+            .iter()
+            .map(|l| l.window.level())
+            .max()
+            .unwrap_or_default()
+    }
+
+    pub fn limit(&self, id: &str) -> Option<&LimitWindow> {
+        self.limits.iter().find(|l| l.id == id).map(|l| &l.window)
     }
 }
 
@@ -235,6 +286,8 @@ pub enum Activity {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Snapshot {
+    /// Every agent found on this computer, for the chat filter.
+    pub providers: Vec<ProviderInfo>,
     pub usage: Vec<ProviderUsage>,
     pub chats: Vec<ChatContext>,
     pub level: Level,
@@ -242,6 +295,14 @@ pub struct Snapshot {
     pub context_limit: Option<u64>,
     /// Sent so the window colors bars at the same points as the tray and alerts.
     pub thresholds: Thresholds,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProviderInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Whether ACM can list this agent's chats, so the chat filter offers it.
+    pub chats: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -273,6 +334,7 @@ impl Snapshot {
             .max()
             .unwrap_or_default();
         Snapshot {
+            providers: Vec::new(),
             usage,
             chats,
             level,
@@ -284,16 +346,17 @@ impl Snapshot {
     pub fn tooltip(&self) -> String {
         let mut lines = vec!["Agent Context Monitor".to_string()];
         for u in &self.usage {
-            let part = |label: &str, w: &LimitWindow| match w {
-                LimitWindow::Reported { used_percent, .. } => Some(format!(
-                    "{label} {:.0}% left",
-                    (100.0 - used_percent).max(0.0)
-                )),
-                _ => None,
-            };
-            let parts: Vec<String> = [part("session", &u.session), part("week", &u.weekly)]
-                .into_iter()
-                .flatten()
+            let parts: Vec<String> = u
+                .limits
+                .iter()
+                .filter_map(|l| match l.window {
+                    LimitWindow::Reported { used_percent, .. } => Some(format!(
+                        "{} {:.0}% left",
+                        l.short,
+                        (100.0 - used_percent).max(0.0)
+                    )),
+                    _ => None,
+                })
                 .collect();
             let parts = if u.stale { Vec::new() } else { parts };
             let summary = if parts.is_empty() {
@@ -333,10 +396,10 @@ mod tests {
     fn old_readings_are_stale_and_do_not_color_the_tray() {
         let mut usage = ProviderUsage::unknown("x", "X", "");
         usage.observed_at = Some("2026-10-19T13:03:28.563Z".into());
-        usage.weekly = LimitWindow::Reported {
+        usage.limits = vec![Limit::weekly(LimitWindow::Reported {
             used_percent: 95.0,
             resets_at: None,
-        };
+        })];
         let observed = 1_792_415_008; // 2026-10-19T13:03:28Z
         let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
         let fresh = usage.clone().with_staleness(at(observed + 60));
