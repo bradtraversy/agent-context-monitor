@@ -4,13 +4,17 @@ mod claude_desktop;
 mod claude_sessions;
 mod codex;
 mod codex_live;
+mod copilot;
+mod cursor;
 mod files;
 mod history;
 mod jsonl;
 mod model;
 mod monitor;
+mod opencode;
 mod programs;
 mod settings;
+mod sources;
 mod tray;
 
 use std::sync::atomic::Ordering;
@@ -18,7 +22,7 @@ use std::time::SystemTime;
 
 use tauri::{Manager, WindowEvent};
 
-use crate::history::ProviderHistory;
+use crate::history::{Period, ProviderHistory};
 use crate::model::Snapshot;
 use crate::monitor::{CheckNow, HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
@@ -53,13 +57,13 @@ fn get_history(
     days: usize,
     weeks: usize,
 ) -> Vec<ProviderHistory> {
-    let providers: Vec<(String, String)> = snapshot
+    let providers: Vec<(String, String, Period)> = snapshot
         .0
         .lock()
         .unwrap()
         .usage
         .iter()
-        .map(|u| (u.provider.to_string(), u.name.to_string()))
+        .map(|u| (u.provider.to_string(), u.name.to_string(), Period::of(u)))
         .collect();
     history::load(
         &file.0,
@@ -172,7 +176,7 @@ pub fn run() {
             }
             // Opening the window should show fresh usage, not a reading from minutes ago.
             WindowEvent::Focused(true) => {
-                window.state::<CheckNow>().0.store(true, Ordering::Relaxed);
+                window.state::<CheckNow>().0.fetch_add(1, Ordering::Relaxed);
             }
             WindowEvent::Focused(false) => tray::window_blurred(),
             _ => {}
