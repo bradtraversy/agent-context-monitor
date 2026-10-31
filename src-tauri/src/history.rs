@@ -83,15 +83,15 @@ fn sample_from(u: &ProviderUsage, now: SystemTime) -> Option<Sample> {
     if u.stale || u.status != UsageStatus::Available {
         return None;
     }
-    let LimitWindow::Reported {
+    let Some(&LimitWindow::Reported {
         used_percent: w,
         resets_at: r,
-    } = u.weekly
+    }) = main_limit(u)
     else {
         return None;
     };
-    let s = match u.session {
-        LimitWindow::Reported { used_percent, .. } => Some(used_percent),
+    let s = match u.limit("session") {
+        Some(LimitWindow::Reported { used_percent, .. }) => Some(*used_percent),
         _ => None,
     };
     let t = u
@@ -107,6 +107,30 @@ fn sample_from(u: &ProviderUsage, now: SystemTime) -> Option<Sample> {
         w,
         r,
     })
+}
+
+/// The limit the History tab charts: the weekly one, or the monthly one for plans billed
+/// by the month.
+fn main_limit(u: &ProviderUsage) -> Option<&LimitWindow> {
+    u.limit("weekly").or_else(|| u.limit("monthly"))
+}
+
+/// How long a provider's charted limit lasts.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Period {
+    Week,
+    Month,
+}
+
+impl Period {
+    pub fn of(u: &ProviderUsage) -> Period {
+        if u.limit("weekly").is_none() && u.limit("monthly").is_some() {
+            Period::Month
+        } else {
+            Period::Week
+        }
+    }
 }
 
 fn line(sample: &Sample) -> String {
@@ -137,13 +161,14 @@ pub struct Bar {
 pub struct ProviderHistory {
     pub provider: String,
     pub name: String,
+    pub period: Period,
     pub daily: Vec<Bar>,
     pub weekly: Vec<Bar>,
 }
 
 pub fn load(
     path: &PathBuf,
-    providers: &[(String, String)],
+    providers: &[(String, String, Period)],
     now: SystemTime,
     offset_at: &dyn Fn(i64) -> i64,
     days: usize,
@@ -156,13 +181,18 @@ pub fn load(
     let samples = read_samples(path);
     providers
         .iter()
-        .map(|(provider, name)| {
+        .map(|(provider, name, period)| {
             let mine: Vec<&Sample> = samples.iter().filter(|s| &s.p == provider).collect();
+            let weekly = match period {
+                Period::Week => weekly(&mine, unix_secs(now), weeks),
+                Period::Month => week_sums(&daily(&mine, unix_secs(now), offset_at, weeks * 7)),
+            };
             ProviderHistory {
                 provider: provider.clone(),
                 name: name.clone(),
+                period: *period,
                 daily: daily(&mine, unix_secs(now), offset_at, days),
-                weekly: weekly(&mine, unix_secs(now), weeks),
+                weekly,
             }
         })
         .collect()
@@ -194,6 +224,24 @@ fn daily(samples: &[&Sample], now: i64, offset_at: &dyn Fn(i64) -> i64, days: us
             current: day == today,
         })
         .collect()
+}
+
+/// A monthly limit has no weekly windows, so each week shows the share of the monthly limit
+/// used over seven days, ending today.
+fn week_sums(days: &[Bar]) -> Vec<Bar> {
+    let mut weeks: Vec<Bar> = days
+        .rchunks(7)
+        .map(|week| {
+            let known: Vec<f64> = week.iter().filter_map(|b| b.used).collect();
+            Bar {
+                start: week[0].start,
+                used: (!known.is_empty()).then(|| known.iter().sum()),
+                current: week.iter().any(|b| b.current),
+            }
+        })
+        .collect();
+    weeks.reverse();
+    weeks
 }
 
 /// Highest weekly usage reached in each weekly window, keyed by its reset time.
@@ -239,10 +287,10 @@ mod tests {
         let mut u = ProviderUsage::unknown("claude", "Claude", "");
         u.status = UsageStatus::Available;
         u.observed_at = chrono::DateTime::from_timestamp(observed, 0).map(|t| t.to_rfc3339());
-        u.weekly = LimitWindow::Reported {
+        u.limits = vec![crate::model::Limit::weekly(LimitWindow::Reported {
             used_percent: weekly,
             resets_at: Some(NOW + DAY),
-        };
+        })];
         u
     }
 
@@ -347,10 +395,30 @@ mod tests {
             .collect();
         fs::write(&path, text).unwrap();
         let now = UNIX_EPOCH + Duration::from_secs(NOW as u64);
-        let providers = [("claude".to_string(), "Claude".to_string())];
+        let providers = [("claude".to_string(), "Claude".to_string(), Period::Week)];
         let history = load(&path, &providers, now, &|_| 0, 14, 8);
         assert_eq!(history[0].daily.len(), 14);
         assert_eq!(history[0].weekly.len(), 8);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn monthly_limits_add_up_each_seven_days() {
+        let day = |i: i64, used| Bar {
+            start: i * DAY,
+            used,
+            current: i == 13,
+        };
+        let days: Vec<Bar> = (0..14)
+            .map(|i| day(i, if i < 3 { None } else { Some(1.0) }))
+            .collect();
+        let weeks = week_sums(&days);
+        assert_eq!(weeks.len(), 2);
+        assert_eq!(weeks[0].start, 0);
+        assert_eq!(weeks[0].used, Some(4.0));
+        assert!(!weeks[0].current);
+        assert_eq!(weeks[1].start, 7 * DAY);
+        assert_eq!(weeks[1].used, Some(7.0));
+        assert!(weeks[1].current);
     }
 }

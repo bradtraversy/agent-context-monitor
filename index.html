@@ -31,11 +31,7 @@
         <div class="loading" role="status"><span class="spinner"></span>Fetching your usage</div>
       </section>
       <section role="tabpanel" id="panel-context" data-title="Context" aria-labelledby="tab-context" hidden>
-        <div class="filter" role="radiogroup" aria-label="Show chats from">
-          <button role="radio" data-provider="all" aria-checked="true">All</button>
-          <button role="radio" data-provider="claude" aria-checked="false">Claude</button>
-          <button role="radio" data-provider="codex" aria-checked="false">Codex</button>
-        </div>
+        <div class="filter" id="provider-filter" role="radiogroup" aria-label="Show chats from"></div>
         <label class="limit-picker">
           Context limit
           <select id="context-limit">

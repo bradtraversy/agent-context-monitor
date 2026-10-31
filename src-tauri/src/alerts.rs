@@ -105,11 +105,12 @@ impl Alerts {
         self.sent.chats = full;
 
         for usage in snapshot.usage.iter().filter(|u| !u.stale) {
-            for (label, window) in [("session", &usage.session), ("weekly", &usage.weekly)] {
+            for limit in &usage.limits {
+                let label = limit.id;
                 let LimitWindow::Reported {
                     used_percent,
                     resets_at,
-                } = window
+                } = &limit.window
                 else {
                     continue;
                 };
@@ -134,7 +135,7 @@ impl Alerts {
                         *resets_at,
                     ));
                     alerts.push(Alert {
-                        title: format!("{} {label} usage is almost gone", usage.name),
+                        title: format!("{} {} usage is almost gone", usage.name, limit.short),
                         body: format!("{:.0}% left.", (100.0 - used_percent).max(0.0)),
                     });
                 }
@@ -238,11 +239,11 @@ mod tests {
     fn usage_alerts_once_per_window() {
         let usage = |used, resets_at, stale| {
             let mut u = ProviderUsage::unknown("codex", "Codex", "");
-            u.weekly = LimitWindow::Reported {
+            u.limits = vec![crate::model::Limit::weekly(LimitWindow::Reported {
                 used_percent: used,
                 // Offsets from a reset a day from now.
                 resets_at: Some(unix_secs(now()) + 86_400 + resets_at),
-            };
+            })];
             u.stale = stale;
             u
         };
@@ -286,10 +287,10 @@ mod tests {
     fn a_window_without_a_reset_time_alerts_again_after_dropping() {
         let usage = |used| {
             let mut u = ProviderUsage::unknown("codex", "Codex", "");
-            u.weekly = LimitWindow::Reported {
+            u.limits = vec![crate::model::Limit::weekly(LimitWindow::Reported {
                 used_percent: used,
                 resets_at: None,
-            };
+            })];
             u
         };
         let mut alerts = Alerts::default();

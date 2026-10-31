@@ -15,8 +15,7 @@ interface ProviderUsage {
   note: string | null;
   plan: string | null;
   observed_at: string | null;
-  session: LimitWindow;
-  weekly: LimitWindow;
+  limits: { id: string; label: string; short: string; window: LimitWindow }[];
   stale: boolean;
   action: "sign_in" | null;
 }
@@ -45,6 +44,7 @@ interface ChatContext {
 }
 
 interface Snapshot {
+  providers: { id: string; name: string; chats: boolean }[];
   usage: ProviderUsage[];
   chats: ChatContext[];
   level: Level;
@@ -61,6 +61,7 @@ interface Bar {
 interface ProviderHistory {
   provider: string;
   name: string;
+  period: "week" | "month";
   daily: Bar[];
   weekly: Bar[];
 }
@@ -71,8 +72,7 @@ type Range = "daily" | "weekly";
 const usagePanel = document.querySelector<HTMLElement>("#panel-usage")!;
 const chatList = document.querySelector<HTMLElement>("#chat-list")!;
 const limitPicker = document.querySelector<HTMLSelectElement>("#context-limit")!;
-const filterButtons = [...document.querySelectorAll<HTMLButtonElement>(".filter [data-provider]")];
-const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
+const providerFilterGroup = document.querySelector<HTMLElement>("#provider-filter")!;
 let providerFilter = localStorage.getItem("providerFilter") ?? "all";
 const historyList = document.querySelector<HTMLElement>("#history-list")!;
 const historyPanel = document.querySelector<HTMLElement>("#panel-history")!;
@@ -165,7 +165,7 @@ function usageCard(u: ProviderUsage): string {
       : "";
   const body =
     u.status === "available"
-      ? limitRow("Current session", u.session) + limitRow("This week", u.weekly)
+      ? u.limits.map((l) => limitRow(l.label, l.window)).join("")
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
   const error = signInErrors.get(u.provider);
@@ -219,6 +219,23 @@ function chatRow(c: ChatContext): string {
 }
 
 let usageHtml = "";
+let filterHtml = "";
+
+function providerName(id: string): string {
+  return snapshot?.providers.find((p) => p.id === id)?.name ?? id;
+}
+
+// One button per agent found on this computer, so the filter grows as agents are added.
+function renderFilter() {
+  const providers = (snapshot?.providers ?? []).filter((p) => p.chats);
+  const html = [{ id: "all", name: "All" }, ...providers]
+    .map(
+      (p) =>
+        `<button role="radio" data-provider="${escape(p.id)}" aria-checked="${p.id === providerFilter}">${escape(p.name)}</button>`,
+    )
+    .join("");
+  if (html !== filterHtml) providerFilterGroup.innerHTML = filterHtml = html;
+}
 
 function render() {
   // The first check takes a few seconds, and until then the page keeps its loading spinners.
@@ -227,8 +244,11 @@ function render() {
   const html = snapshot.usage.map(usageCard).join("");
   if (html !== usageHtml) usagePanel.innerHTML = usageHtml = html;
   if (document.activeElement !== limitPicker) limitPicker.value = String(snapshot.context_limit ?? "");
+  // A filter for an agent that is no longer found falls back to every chat.
+  if (!snapshot.providers.some((p) => p.chats && p.id === providerFilter)) providerFilter = "all";
+  renderFilter();
   const chats = snapshot.chats.filter((c) => providerFilter === "all" || c.provider === providerFilter);
-  const who = PROVIDER_LABEL[providerFilter] ?? "Claude or Codex";
+  const who = providerFilter === "all" ? "agent" : providerName(providerFilter);
   const capped = wide.matches && !showAllChats && chats.length > WIDE_CHAT_LIMIT + 1;
   const shown = capped ? chats.slice(0, WIDE_CHAT_LIMIT) : chats;
   const more =
@@ -259,11 +279,13 @@ chatList.addEventListener("click", (e) => {
 function setFilter(provider: string) {
   providerFilter = provider;
   localStorage.setItem("providerFilter", provider);
-  for (const b of filterButtons) b.setAttribute("aria-checked", String(b.dataset.provider === provider));
   render();
 }
 
-for (const b of filterButtons) b.addEventListener("click", () => setFilter(b.dataset.provider!));
+providerFilterGroup.addEventListener("click", (e) => {
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-provider]");
+  if (button) setFilter(button.dataset.provider!);
+});
 limitPicker.addEventListener("change", () => {
   const tokens = limitPicker.value ? Number(limitPicker.value) : null;
   invoke("set_context_limit", { tokens });
@@ -280,8 +302,9 @@ function barLabel(b: Bar): string {
   return b.current ? `${week}, so far` : week;
 }
 
-function barValue(b: Bar): string {
+function barValue(b: Bar, period: ProviderHistory["period"]): string {
   if (b.used === null) return "no readings yet";
+  if (period === "month") return `${b.used.toFixed(0)}% of the monthly limit used`;
   return range === "daily" ? `${b.used.toFixed(0)}% of the weekly limit used` : `${b.used.toFixed(0)}% of the limit used`;
 }
 
@@ -292,12 +315,13 @@ function historyCard(h: ProviderHistory): string {
     return `<article class="card"><h2>${escape(h.name)}</h2>
       <p class="note">No readings yet. Bars fill in as the app checks your usage.</p></article>`;
   }
-  // Weekly bars read against the full limit; daily ones scale up so small days stay visible.
-  const max = range === "weekly" ? 100 : Math.max(10, ...known.map((b) => b.used!));
+  // Weekly peaks read against the full limit; other bars scale up so small ones stay visible.
+  const peaks = range === "weekly" && h.period === "week";
+  const max = peaks ? 100 : Math.max(10, ...known.map((b) => b.used!));
   const cols = bars
     .map((b, i) => {
       const height = b.used === null ? 0 : Math.max(b.used > 0 ? 2 : 0, (b.used / max) * 100);
-      const level = range === "weekly" && b.used !== null ? levelFor(b.used) : "accent";
+      const level = peaks && b.used !== null ? levelFor(b.used) : "accent";
       const date = new Date(b.start * 1000);
       // A month of daily bars is too tight to label each one, so label every seventh back from today.
       const tick =
@@ -308,7 +332,7 @@ function historyCard(h: ProviderHistory): string {
             : (bars.length - 1 - i) % 7 === 0
               ? date.toLocaleDateString([], { month: "short", day: "numeric" })
               : "";
-      const text = `${barLabel(b)}: ${barValue(b)}`;
+      const text = `${barLabel(b)}: ${barValue(b, h.period)}`;
       return `<button class="col" data-index="${i}" data-empty="${b.used === null}" data-current="${b.current}"
           aria-label="${escape(text)}" title="${escape(text)}">
         <span class="col-track"><span class="col-fill" data-level="${level}" style="height:${height}%"></span></span>
@@ -317,7 +341,7 @@ function historyCard(h: ProviderHistory): string {
     })
     .join("");
   const latest = known[known.length - 1];
-  const summary = `${barLabel(latest)}: ${barValue(latest)}`;
+  const summary = `${barLabel(latest)}: ${barValue(latest, h.period)}`;
   return `<article class="card history" data-provider="${escape(h.provider)}">
     <h2>${escape(h.name)}</h2>
     <div class="chart" style="--cols:${bars.length}">${cols}</div>
@@ -328,8 +352,8 @@ function historyCard(h: ProviderHistory): string {
 function renderHistory() {
   const intro =
     range === "daily"
-      ? "How much of each weekly limit you used per day."
-      : "The most of each weekly limit you used before it reset.";
+      ? "How much of each plan limit you used per day."
+      : "The most of each weekly limit you used before it reset, or how much of a monthly limit you used each week.";
   historyList.innerHTML =
     `<p class="sub intro">${intro}</p>` +
     (history.map(historyCard).join("") || `<p class="empty">Usage history appears once usage is checked.</p>`);

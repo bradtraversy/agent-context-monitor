@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 
 use crate::files;
-use crate::model::{LimitWindow, ProviderUsage, UsageAction, unix_secs};
+use crate::model::{Limit, LimitWindow, ProviderUsage, UsageAction, unix_secs};
 use crate::programs;
 
 const PROVIDER: &str = "claude";
@@ -403,7 +403,10 @@ impl ClaudeSource {
         let mut usage = ProviderUsage::from_reading(
             PROVIDER,
             NAME,
-            (to_window(reading.session), to_window(reading.weekly)),
+            vec![
+                Limit::session(to_window(reading.session)),
+                Limit::weekly(to_window(reading.weekly)),
+            ],
             reading.plan.clone(),
             reading.fetched_at.clone(),
             "Claude reported no plan limits.",

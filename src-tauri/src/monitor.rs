@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,9 +13,13 @@ use crate::claude::ClaudeSource;
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
 use crate::codex_live;
+use crate::copilot::CopilotSource;
+use crate::cursor::CursorSource;
 use crate::history::Recorder;
-use crate::model::{LIVE_REFRESH_AFTER_SECS, Snapshot, unix_secs};
+use crate::model::{LIVE_REFRESH_AFTER_SECS, ProviderInfo, Snapshot, unix_secs};
+use crate::opencode::OpenCodeChats;
 use crate::settings::Settings;
+use crate::sources;
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -31,14 +35,13 @@ const LOGIN_PROBE_SECS: i64 = 30;
 /// How long the window keeps its loading spinner waiting for the first live checks, so it
 /// opens on fresh numbers instead of old ones from session files.
 const FIRST_CHECK_WAIT: Duration = Duration::from_secs(15);
-const LIVE_SOURCES: usize = 2;
 
 #[derive(Default)]
 pub struct SharedSnapshot(pub Mutex<Snapshot>);
 
-/// Set when the window is opened, so live usage is re-checked right away.
+/// Counts window openings, so each live check notices one and re-checks right away.
 #[derive(Default)]
-pub struct CheckNow(pub Arc<AtomicBool>);
+pub struct CheckNow(pub Arc<AtomicU64>);
 
 /// Where usage readings are kept so the History tab can chart them.
 pub struct HistoryFile(pub PathBuf);
@@ -78,11 +81,13 @@ pub fn start(app: AppHandle) {
             let mut last_check = i64::MIN;
             let mut last_login_probe = i64::MIN;
             let mut first = true;
+            let mut seen_open = check_now.load(Ordering::Relaxed);
             loop {
                 let now = SystemTime::now();
                 let secs = unix_secs(now);
+                let open_count = check_now.load(Ordering::Relaxed);
                 let reason = CheckReason {
-                    opened: check_now.swap(false, Ordering::Relaxed),
+                    opened: std::mem::replace(&mut seen_open, open_count) != open_count,
                     chat_active: newest_claude_chat.load(Ordering::Relaxed) >= last_check,
                 };
                 let mut due = claude_check_due(secs, last_check, reason, source.backing_off(now));
@@ -127,13 +132,34 @@ pub fn start(app: AppHandle) {
         });
     }
 
+    let config_dir = app
+        .path()
+        .config_dir()
+        .unwrap_or_else(|_| home.join(".config"));
+    let opened = Arc::clone(&app.state::<CheckNow>().0);
+    let live_sources = [
+        sources::spawn(
+            CopilotSource::new(home.clone()),
+            Arc::clone(&opened),
+            Arc::clone(&first_checks_done),
+        ),
+        sources::spawn(
+            CursorSource::new(home.clone(), config_dir),
+            Arc::clone(&opened),
+            Arc::clone(&first_checks_done),
+        ),
+    ];
+    // Claude and Codex have their own checks above.
+    let live_source_count = live_sources.len() + 2;
+
     thread::spawn(move || {
+        let mut opencode = OpenCodeChats::new(home);
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
-            if first_checks_done.load(Ordering::Relaxed) < LIVE_SOURCES
+            if first_checks_done.load(Ordering::Relaxed) < live_source_count
                 && started.elapsed() < FIRST_CHECK_WAIT
             {
                 thread::sleep(Duration::from_millis(200));
@@ -145,10 +171,17 @@ pub fn start(app: AppHandle) {
                 newest_codex_file.store(newest, Ordering::Relaxed);
             }
             let live = codex_live.lock().unwrap().clone();
-            let usage = vec![
+            let mut usage = vec![
                 claude.lock().unwrap().usage(now).with_staleness(now),
                 codex.usage(now, live.as_ref()).with_staleness(now),
             ];
+            // Readings age between checks, so staleness is worked out again each time.
+            usage.extend(
+                live_sources
+                    .iter()
+                    .filter_map(|l| l.lock().unwrap().clone())
+                    .map(|u| u.with_staleness(now)),
+            );
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
@@ -156,11 +189,25 @@ pub fn start(app: AppHandle) {
                 newest_claude_chat.store(newest, Ordering::Relaxed);
             }
             chats.extend(codex.chats(now));
+            chats.extend(opencode.chats(now));
             for chat in &mut chats {
                 chat.context = chat.context.take().map(|c| c.with_limit(limit));
             }
             chats.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
+            let mut providers: Vec<ProviderInfo> = usage
+                .iter()
+                .map(|u| ProviderInfo {
+                    id: u.provider,
+                    name: u.name,
+                    // Claude and Codex chats are read above; the others only report usage.
+                    chats: matches!(u.provider, "claude" | "codex"),
+                })
+                .collect();
+            if opencode.installed() {
+                providers.push(OpenCodeChats::INFO);
+            }
             let mut snapshot = Snapshot::new(usage, chats, now);
+            snapshot.providers = providers;
             snapshot.context_limit = limit;
             for alert in alerts.check(&snapshot, now) {
                 let _ = app
