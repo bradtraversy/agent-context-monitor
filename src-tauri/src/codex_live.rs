@@ -5,7 +5,7 @@
 //! request. Codex uses its own login; ACM never reads Codex's token.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -50,8 +50,9 @@ struct Window {
     resets_at: Option<i64>,
 }
 
-pub fn fetch(now: SystemTime) -> Option<RateReading> {
-    let bin = find_codex()?;
+/// A fresh reading, or why there isn't one, said for the usage card.
+pub fn fetch(now: SystemTime) -> Result<RateReading, &'static str> {
+    let bin = find_codex().ok_or("Couldn't find Codex to ask it for fresh usage.")?;
     let mut command = Command::new(&bin);
     command
         .arg("app-server")
@@ -59,8 +60,8 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // An npm install of Codex is a Node script, and an app opened from the Dock or
-    // Start menu may not have Node on its PATH. Node usually sits next to it.
-    if let Some(path) = bin.parent().and_then(path_with) {
+    // Start menu may not have Node on its PATH, so it gets the terminal's PATH too.
+    if let Some(path) = programs::path_for(&bin) {
         command.env("PATH", path);
     }
     #[cfg(windows)]
@@ -70,8 +71,9 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = command.spawn().ok()?;
-    let stdout = child.stdout.take()?;
+    const NOT_STARTED: &str = "Couldn't start Codex to ask it for fresh usage.";
+    let mut child = command.spawn().map_err(|_| NOT_STARTED)?;
+    let stdout = child.stdout.take().ok_or(NOT_STARTED)?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -99,11 +101,13 @@ pub fn fetch(now: SystemTime) -> Option<RateReading> {
         drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
-        return result.and_then(|r| reading_from(r, now));
+        return result
+            .ok_or("Codex didn't answer when asked for fresh usage.")
+            .and_then(|r| reading_from(r, now).ok_or("Codex's usage check had no Codex limits."));
     }
     let _ = child.kill();
     let _ = child.wait();
-    None
+    Err(NOT_STARTED)
 }
 
 fn reading_from(mut result: ReadResult, now: SystemTime) -> Option<RateReading> {
@@ -145,13 +149,6 @@ const BUNDLED: &[&str] = &[
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
 ];
-
-/// The current PATH with `dir` in front, so Codex's own folder is searched first.
-fn path_with(dir: &Path) -> Option<std::ffi::OsString> {
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current));
-    std::env::join_paths(dirs).ok()
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,10 @@
 //! Finding installed command line tools and opening one in a terminal window.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// The first of `names` in the usual install folders. An app opened from the Dock,
 /// Start menu, or a launcher gets a much shorter PATH than a terminal, so those
@@ -13,10 +16,25 @@ pub fn find(names: &[&str]) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// A PATH for running a found program: its own folder first, then every folder searched
+/// for it, so a Node script finds the `node` it was installed with.
+pub fn path_for(program: &Path) -> Option<OsString> {
+    let dirs = program
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(search_dirs());
+    std::env::join_paths(dirs).ok()
+}
+
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    // Folders a shell profile adds, such as a Node install in the home folder.
+    if let Some(path) = login_shell_path() {
+        dirs.extend(std::env::split_paths(path));
+    }
     let home = std::env::home_dir().unwrap_or_default();
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -47,6 +65,62 @@ fn search_dirs() -> Vec<PathBuf> {
         dirs.extend(nvm.into_iter().rev());
     }
     dirs
+}
+
+/// The PATH the user's own terminal gets, asked of their login shell once per run. An
+/// app opened from the Dock or a launcher gets a much shorter one.
+fn login_shell_path() -> Option<&'static OsString> {
+    static PATH: OnceLock<Option<OsString>> = OnceLock::new();
+    PATH.get_or_init(read_login_shell_path).as_ref()
+}
+
+#[cfg(unix)]
+fn read_login_shell_path() -> Option<OsString> {
+    use std::io::Read;
+    const MARK: &str = "__ACM_PATH__";
+    // A slow or stuck shell profile must not hold up the app for long.
+    const WAIT: Duration = Duration::from_secs(5);
+    let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty())?;
+    let mut child = Command::new(shell)
+        .args([
+            "-l",
+            "-i",
+            "-c",
+            &format!("printf '{MARK}%s{MARK}' \"$PATH\""),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    marked_path(&out, MARK).map(OsString::from)
+}
+
+#[cfg(not(unix))]
+fn read_login_shell_path() -> Option<OsString> {
+    None
+}
+
+/// The text between two marks, since a shell profile can print its own lines around it.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn marked_path<'a>(out: &'a str, mark: &str) -> Option<&'a str> {
+    let start = out.find(mark)? + mark.len();
+    let end = start + out[start..].find(mark)?;
+    Some(&out[start..end]).filter(|p| !p.is_empty())
 }
 
 /// `v22.10.0` from nvm's `.../v22.10.0/bin`, as numbers so it sorts after `v22.9.0`.
@@ -169,6 +243,14 @@ mod tests {
             .map(|b| b.parent().unwrap().file_name().unwrap())
             .collect();
         assert_eq!(names, ["v8.1.0", "v22.9.0", "v22.10.0"]);
+    }
+
+    #[test]
+    fn reads_the_path_between_the_marks() {
+        let out = "Welcome back!\n__M__/a/bin:/usr/bin__M__\n";
+        assert_eq!(marked_path(out, "__M__"), Some("/a/bin:/usr/bin"));
+        assert_eq!(marked_path("no marks", "__M__"), None);
+        assert_eq!(marked_path("__M____M__", "__M__"), None);
     }
 
     #[test]
