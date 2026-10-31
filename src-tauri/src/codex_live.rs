@@ -5,7 +5,7 @@
 //! request. Codex uses its own login; ACM never reads Codex's token.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -60,8 +60,8 @@ pub fn fetch(now: SystemTime) -> Result<RateReading, &'static str> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // An npm install of Codex is a Node script, and an app opened from the Dock or
-    // Start menu may not have Node on its PATH. Node usually sits next to it.
-    if let Some(path) = bin.parent().and_then(path_with) {
+    // Start menu may not have Node on its PATH, so it gets the terminal's PATH too.
+    if let Some(path) = programs::path_for(&bin) {
         command.env("PATH", path);
     }
     #[cfg(windows)]
@@ -149,13 +149,6 @@ const BUNDLED: &[&str] = &[
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
 ];
-
-/// The current PATH with `dir` in front, so Codex's own folder is searched first.
-fn path_with(dir: &Path) -> Option<std::ffi::OsString> {
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current));
-    std::env::join_paths(dirs).ok()
-}
 
 #[cfg(test)]
 mod tests {
