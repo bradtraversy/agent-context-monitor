@@ -130,6 +130,12 @@ function resetText(unixSeconds: number): string {
   return `resets ${when} (in ${countdown})`;
 }
 
+// Rounding would show a little use as "100% left", so the first percent gets a decimal.
+function percentLeft(used: number): string {
+  const left = Math.max(0, 100 - used);
+  return used > 0 && left > 99 ? left.toFixed(1) : left.toFixed(0);
+}
+
 function bar(used: number, level: Level): string {
   const pct = Math.min(100, Math.max(0, used));
   return `<div class="bar" data-level="${level}"><div class="fill" style="width:${pct}%"></div></div>`;
@@ -146,10 +152,9 @@ function limitRow(label: string, window: LimitWindow): string {
     </div>`;
   }
   const level = levelFor(window.used_percent);
-  const left = Math.max(0, 100 - window.used_percent);
   const warn = LEVEL_TEXT[level] ? ` <strong class="tag">${LEVEL_TEXT[level]}</strong>` : "";
   return `<div class="limit">
-    <div class="limit-head"><span>${label}</span><span><b>${left.toFixed(0)}% left</b>${warn}</span></div>
+    <div class="limit-head"><span>${label}</span><span><b>${percentLeft(window.used_percent)}% left</b>${warn}</span></div>
     ${bar(window.used_percent, level)}
     <div class="sub">${window.resets_at ? resetText(window.resets_at) : "Reset time unknown"}</div>
   </div>`;
