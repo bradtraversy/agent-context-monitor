@@ -21,6 +21,7 @@ use crate::programs;
 const PROVIDER: &str = "claude";
 const NAME: &str = "Claude";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const SIGN_IN_HINT: &str = "Sign in to Claude Code to see Claude usage.";
 const EXPIRED_HINT: &str = "Claude's login expired. Sign in again to see usage.";
 const INSTALL_HINT: &str = "Install Claude Code to see Claude usage.";
@@ -116,6 +117,34 @@ struct TokenResponse {
 struct UsageResponse {
     five_hour: Option<UsageWindow>,
     seven_day: Option<UsageWindow>,
+    /// The meters that apply to this plan. Claude Code shows exactly these, so a window
+    /// the plan doesn't have can still turn up in `five_hour` without a row here.
+    limits: Option<Vec<LimitRow>>,
+}
+
+#[derive(Deserialize)]
+struct LimitRow {
+    group: Option<String>,
+}
+
+impl UsageResponse {
+    /// A window counts only if the server lists a meter for it. Older replies without
+    /// the list fall back to the window itself.
+    fn applies(&self, group: &str) -> bool {
+        self.limits
+            .as_ref()
+            .is_none_or(|rows| rows.iter().any(|r| r.group.as_deref() == Some(group)))
+    }
+}
+
+#[derive(Deserialize)]
+struct ProfileResponse {
+    organization: Option<ProfileOrganization>,
+}
+
+#[derive(Deserialize)]
+struct ProfileOrganization {
+    plan_display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +157,9 @@ struct UsageWindow {
 struct Reading {
     fetched_at: String,
     plan: Option<String>,
+    /// The login the plan name came from, when Claude's profile supplied it, so it is
+    /// looked up once per login rather than on every check.
+    plan_login: Option<u64>,
     session: Option<(f64, Option<i64>)>,
     weekly: Option<(f64, Option<i64>)>,
 }
@@ -300,11 +332,32 @@ impl ClaudeSource {
             }
         };
 
+        // The saved login still says "max" on plans Claude now calls Ultra, so the
+        // name comes from the profile, falling back to the saved one.
+        let login = hash_bytes(&raw);
+        let known = self
+            .last_good
+            .as_ref()
+            .filter(|r| r.plan_login == Some(login))
+            .and_then(|r| r.plan.clone());
+        let (plan, plan_login) = match known.or_else(|| plan_display_name(&token)) {
+            Some(name) => (Some(name), Some(login)),
+            None => (oauth.subscription.as_deref().map(plan_label), None),
+        };
+        let session_applies = body.applies("session");
+        let weekly_applies = body.applies("weekly");
         Ok(Reading {
             fetched_at: rfc3339_now(now),
-            plan: oauth.subscription,
-            session: body.five_hour.and_then(window_values),
-            weekly: body.seven_day.and_then(window_values),
+            plan,
+            plan_login,
+            session: body
+                .five_hour
+                .filter(|_| session_applies)
+                .and_then(window_values),
+            weekly: body
+                .seven_day
+                .filter(|_| weekly_applies)
+                .and_then(window_values),
         })
     }
 
@@ -635,6 +688,39 @@ fn keychain_update_line(account: &str, service: &str, hex: &str) -> String {
     format!("add-generic-password -U -a \"{account}\" -s \"{service}\" -X \"{hex}\"\n")
 }
 
+/// The plan's name as Claude shows it, e.g. "Ultra". Best effort: without it the
+/// saved plan type is shown instead.
+fn plan_display_name(token: &str) -> Option<String> {
+    let mut response = ureq::get(PROFILE_URL)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .config()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .call()
+        .ok()?;
+    let body: ProfileResponse = response.body_mut().read_json().ok()?;
+    body.organization?
+        .plan_display_name
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// "max" -> "Max", for when the profile has no display name.
+fn plan_label(subscription: &str) -> String {
+    let mut chars = subscription.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn window_values(w: UsageWindow) -> Option<(f64, Option<i64>)> {
     let used = w.utilization?.clamp(0.0, 100.0);
     let reset = w
@@ -671,6 +757,55 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_windows_the_server_lists_a_meter_for_count() {
+        let parse = |json: &str| serde_json::from_str::<UsageResponse>(json).unwrap();
+        // The Ultra plan's reply today: still a 5-hour window, with a session meter.
+        let ultra = parse(
+            r#"{"five_hour":{"utilization":4.0,"resets_at":"2026-10-31T15:00:00.14+00:00",
+                "limit_dollars":null,"locked_reason":null},
+                "seven_day":{"utilization":62.0,"resets_at":"2026-11-01T00:00:00.14+00:00"},
+                "limits":[{"kind":"session","group":"session","percent":4,"is_active":false},
+                    {"kind":"weekly_all","group":"weekly","percent":62,"is_active":true},
+                    {"kind":"weekly_scoped","group":"weekly","percent":60,"is_active":false}]}"#,
+        );
+        assert!(ultra.applies("session") && ultra.applies("weekly"));
+        // A plan without a session meter loses the window even if the server sends one.
+        let no_session = parse(
+            r#"{"five_hour":{"utilization":0.0,"resets_at":null},
+                "seven_day":{"utilization":62.0,"resets_at":null},
+                "limits":[{"kind":"weekly_all","group":"weekly","percent":62}]}"#,
+        );
+        assert!(!no_session.applies("session") && no_session.applies("weekly"));
+        // An idle 5-hour window still shows while its meter is listed.
+        let idle = parse(
+            r#"{"five_hour":{"utilization":0.0,"resets_at":null},
+                "limits":[{"kind":"session","group":"session","percent":0}]}"#,
+        );
+        assert!(idle.applies("session"));
+        assert_eq!(window_values(idle.five_hour.unwrap()), Some((0.0, None)));
+        // Replies from before the meter list keep every window.
+        let older = parse(r#"{"five_hour":{"utilization":6.0,"resets_at":null}}"#);
+        assert!(older.applies("session"));
+    }
+
+    #[test]
+    fn plan_names_read_like_claude_shows_them() {
+        let body: ProfileResponse = serde_json::from_str(
+            r#"{"organization":{"organization_type":"claude_max",
+                "rate_limit_tier":"default_claude_max_20x",
+                "plan_display_name":"Ultra","plan_display_label":"Ultra plan"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            body.organization.unwrap().plan_display_name.as_deref(),
+            Some("Ultra")
+        );
+        assert_eq!(plan_label("max"), "Max");
+        assert_eq!(plan_label("ultra"), "Ultra");
+        assert_eq!(plan_label(""), "");
     }
 
     #[test]
