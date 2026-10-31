@@ -16,7 +16,9 @@ use crate::codex_live;
 use crate::copilot::CopilotSource;
 use crate::cursor::CursorSource;
 use crate::history::Recorder;
-use crate::model::{LIVE_REFRESH_AFTER_SECS, ProviderInfo, Snapshot, unix_secs};
+use crate::model::{
+    LIVE_REFRESH_AFTER_SECS, ProviderInfo, ProviderUsage, Snapshot, UsageStatus, unix_secs,
+};
 use crate::opencode::OpenCodeChats;
 use crate::settings::Settings;
 use crate::sources;
@@ -107,9 +109,12 @@ pub fn start(app: AppHandle) {
     }
 
     let codex_live = Arc::new(Mutex::new(None));
+    // Why the last live check failed, shown when the reading from session files is stale.
+    let codex_problem: Arc<Mutex<Option<&'static str>>> = Arc::default();
     let newest_codex_file = Arc::new(AtomicI64::new(i64::MIN));
     {
         let codex_live = Arc::clone(&codex_live);
+        let codex_problem = Arc::clone(&codex_problem);
         let newest_codex_file = Arc::clone(&newest_codex_file);
         let first_checks_done = Arc::clone(&first_checks_done);
         thread::spawn(move || {
@@ -122,8 +127,12 @@ pub fn start(app: AppHandle) {
                 let newest = last_check.max(newest_codex_file.load(Ordering::Relaxed));
                 if unix_secs(now).saturating_sub(newest) >= LIVE_REFRESH_AFTER_SECS {
                     last_check = unix_secs(now);
-                    if let Some(reading) = codex_live::fetch(now) {
-                        *codex_live.lock().unwrap() = Some(reading);
+                    match codex_live::fetch(now) {
+                        Ok(reading) => {
+                            *codex_live.lock().unwrap() = Some(reading);
+                            *codex_problem.lock().unwrap() = None;
+                        }
+                        Err(problem) => *codex_problem.lock().unwrap() = Some(problem),
                     }
                 }
                 mark_first_check(&mut first, &first_checks_done);
@@ -173,7 +182,10 @@ pub fn start(app: AppHandle) {
             let live = codex_live.lock().unwrap().clone();
             let mut usage = vec![
                 claude.lock().unwrap().usage(now).with_staleness(now),
-                codex.usage(now, live.as_ref()).with_staleness(now),
+                with_problem(
+                    codex.usage(now, live.as_ref()).with_staleness(now),
+                    *codex_problem.lock().unwrap(),
+                ),
             ];
             // Readings age between checks, so staleness is worked out again each time.
             usage.extend(
@@ -253,6 +265,16 @@ fn mark_first_check(first: &mut bool, done: &AtomicUsize) {
     }
 }
 
+/// Says why a live check failed on a card whose reading is out of date or missing.
+fn with_problem(mut usage: ProviderUsage, problem: Option<&str>) -> ProviderUsage {
+    if let Some(problem) = problem
+        && (usage.stale || usage.status == UsageStatus::Unknown)
+    {
+        usage.note = Some(problem.to_string());
+    }
+    usage
+}
+
 fn publish(app: &AppHandle, snapshot: Snapshot) {
     let state = app.state::<SharedSnapshot>();
     {
@@ -288,6 +310,20 @@ mod tests {
         opened: false,
         chat_active: false,
     };
+
+    #[test]
+    fn a_failed_live_check_explains_only_an_old_or_missing_reading() {
+        let problem = Some("Codex didn't answer.");
+        let mut fresh = ProviderUsage::unknown("codex", "Codex", "");
+        fresh.status = UsageStatus::Available;
+        fresh.note = None;
+        assert_eq!(with_problem(fresh.clone(), problem).note, None);
+        let mut old = fresh;
+        old.stale = true;
+        assert_eq!(with_problem(old, problem).note.as_deref(), problem);
+        let missing = ProviderUsage::unknown("codex", "Codex", "No Codex usage.");
+        assert_eq!(with_problem(missing, problem).note.as_deref(), problem);
+    }
 
     #[test]
     fn first_check_runs_right_away() {
