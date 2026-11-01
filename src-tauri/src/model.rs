@@ -259,6 +259,14 @@ impl ContextMeasure {
         self
     }
 
+    /// Measures against the window the agent itself reported, replacing any guess.
+    pub fn with_window(mut self, window: u64) -> Self {
+        self.context_window = Some(window);
+        self.used_percent = Some((self.used_tokens as f64 / window as f64 * 100.0).min(100.0));
+        self.window_guessed = false;
+        self
+    }
+
     /// The share of the window used, when the window is known well enough to warn on.
     pub fn trusted_percent(&self) -> Option<f64> {
         self.used_percent.filter(|_| !self.window_guessed)

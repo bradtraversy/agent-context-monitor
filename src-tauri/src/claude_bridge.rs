@@ -191,7 +191,6 @@ impl ClaudeBridge {
     }
 
     /// The context window Claude Code reported for a session.
-    #[allow(dead_code)]
     pub fn context_window(&self, session_id: &str) -> Option<u64> {
         self.records
             .get(session_id)

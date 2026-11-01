@@ -132,6 +132,11 @@ pub fn start(app: AppHandle) {
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
+            for chat in &mut chats {
+                if let Some(window) = claude.context_window(&chat.id) {
+                    chat.context = chat.context.take().map(|c| c.with_window(window));
+                }
+            }
             chats.extend(codex.chats(now));
             chats.extend(opencode.chats(now));
             for chat in &mut chats {
