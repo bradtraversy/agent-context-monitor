@@ -1,5 +1,5 @@
 mod alerts;
-mod claude;
+mod claude_bridge;
 mod claude_desktop;
 mod claude_sessions;
 mod codex;
@@ -32,23 +32,13 @@ fn get_snapshot(state: tauri::State<SharedSnapshot>) -> Snapshot {
     state.0.lock().unwrap().clone()
 }
 
-// Off the window's thread: it reads or writes files.
+// Off the window's thread, since it saves the settings file.
 #[tauri::command(async)]
 fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
 }
 
-/// Starts signing in to a provider whose usage card asked for it.
-// Off the window's thread: it reads or writes files.
-#[tauri::command(async)]
-fn sign_in(provider: String) -> Result<(), String> {
-    match provider.as_str() {
-        "claude" => claude::sign_in(),
-        _ => Err(format!("Signing in to {provider} isn't supported.")),
-    }
-}
-
-// Off the window's thread: it reads or writes files.
+// Off the window's thread, since it reads the whole history file.
 #[tauri::command(async)]
 fn get_history(
     snapshot: tauri::State<SharedSnapshot>,
@@ -130,6 +120,11 @@ fn resize_window(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Claude Code runs ACM as its status line to hand over usage; that run saves it and
+    // exits without opening anything.
+    if claude_bridge::run_from_args() {
+        return;
+    }
     tauri::Builder::default()
         // Must come first: opening the app again brings up the window that's already running.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -146,8 +141,7 @@ pub fn run() {
             get_snapshot,
             get_history,
             set_context_limit,
-            resize_window,
-            sign_in
+            resize_window
         ])
         .setup(|app| {
             // A menu bar app on macOS, so no Dock icon next to the tray dot.

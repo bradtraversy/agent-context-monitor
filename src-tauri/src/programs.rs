@@ -1,4 +1,4 @@
-//! Finding installed command line tools and opening one in a terminal window.
+//! Finding installed command line tools and the PATH to run them with.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,10 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Printed around the PATH so it can be told apart from what a shell profile prints.
+#[cfg(unix)]
+const MARK: &str = "__ACM_PATH__";
+
 /// The PATH the user's own terminal gets, asked of their login shell once per run. An
 /// app opened from the Dock or a launcher gets a much shorter one.
 fn login_shell_path() -> Option<&'static OsString> {
@@ -76,12 +80,19 @@ fn login_shell_path() -> Option<&'static OsString> {
 
 #[cfg(unix)]
 fn read_login_shell_path() -> Option<OsString> {
-    use std::io::Read;
-    const MARK: &str = "__ACM_PATH__";
     // A slow or stuck shell profile must not hold up the app for long.
     const WAIT: Duration = Duration::from_secs(5);
     let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty())?;
-    let mut child = Command::new(shell)
+    shell_path(&shell, WAIT)
+}
+
+/// Asks `shell` for its login PATH, giving up after `wait`.
+#[cfg(unix)]
+fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
+    use std::io::Read;
+    use std::sync::mpsc;
+    let mut command = Command::new(shell);
+    command
         .args([
             "-l",
             "-i",
@@ -90,24 +101,48 @@ fn read_login_shell_path() -> Option<OsString> {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+        .stderr(Stdio::null());
+    // An interactive shell takes over the terminal ACM was started from and doesn't hand
+    // it back, which leaves Ctrl+C there going nowhere. In its own session it has no
+    // terminal to take.
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().ok()?;
+    // Read as the output arrives instead of after the shell exits: something the profile
+    // starts in the background can keep the output open long after, and waiting for it
+    // to close would never finish.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
             }
         }
-    }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    marked_path(&out, MARK).map(OsString::from)
+    });
+    let deadline = Instant::now() + wait;
+    let mut out = Vec::new();
+    let path = loop {
+        if let Some(path) = marked_path(&String::from_utf8_lossy(&out), MARK) {
+            break Some(OsString::from(path));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(chunk) => out.extend(chunk),
+            // Timed out, or the output closed without the PATH in it.
+            Err(_) => break None,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    path
 }
 
 #[cfg(not(unix))]
@@ -137,96 +172,6 @@ fn node_version(bin: &Path) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// Runs `program` with `args` in a new terminal window that stays open afterwards.
-/// `args` are fixed words, never user input.
-pub fn open_in_terminal(program: &Path, args: &[&str]) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        // Opening a .command file runs it in the user's terminal app with their own
-        // shell setup, without asking for permission to control Terminal.
-        use std::os::unix::fs::PermissionsExt;
-        let script = std::env::temp_dir().join("agent-context-monitor-sign-in.command");
-        std::fs::write(&script, shell_script(program, args))?;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
-        spawn(Command::new("/usr/bin/open").arg(&script))
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        // cmd drops the outer quotes, leaving the quoted program path and its words.
-        let line = format!("/k \"\"{}\" {}\"", program.display(), args.join(" "));
-        spawn(
-            Command::new("cmd")
-                .raw_arg(line)
-                .creation_flags(CREATE_NEW_CONSOLE),
-        )
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
-        let script = shell_script(program, args);
-        let preferred = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty());
-        let candidates = preferred
-            .as_deref()
-            .map(|t| (t, &["-e"][..]))
-            .into_iter()
-            .chain(LINUX_TERMINALS.iter().copied());
-        for (terminal, run) in candidates {
-            if let Some(bin) = find(&[terminal]) {
-                return spawn(Command::new(bin).args(run).args(["sh", "-c", &script]));
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no terminal app found",
-        ))
-    }
-}
-
-/// Terminal apps and the option that makes each run a command, most likely first.
-#[cfg(not(any(target_os = "macos", windows)))]
-const LINUX_TERMINALS: &[(&str, &[&str])] = &[
-    ("x-terminal-emulator", &["-e"]),
-    ("gnome-terminal", &["--"]),
-    ("ptyxis", &["--"]),
-    ("kgx", &["--"]),
-    ("konsole", &["-e"]),
-    ("xfce4-terminal", &["-x"]),
-    ("mate-terminal", &["-x"]),
-    ("tilix", &["-e"]),
-    ("kitty", &[]),
-    ("alacritty", &["-e"]),
-    ("wezterm", &["start", "--"]),
-    ("ghostty", &["-e"]),
-    ("foot", &[]),
-    ("xterm", &["-e"]),
-];
-
-/// A shell script that runs the program, then waits so its last words stay readable.
-#[cfg_attr(windows, allow(dead_code))]
-fn shell_script(program: &Path, args: &[&str]) -> String {
-    let quoted = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-    let command: Vec<String> = std::iter::once(program.to_string_lossy().as_ref())
-        .chain(args.iter().copied())
-        .map(quoted)
-        .collect();
-    format!(
-        "#!/bin/sh\nclear\n{}\nprintf '\\nYou can close this window.\\n'\nread _\n",
-        command.join(" ")
-    )
-}
-
-/// Starts the program without waiting, reaping it in the background once it exits.
-fn spawn(command: &mut Command) -> std::io::Result<()> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    std::thread::spawn(move || child.wait());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,10 +198,24 @@ mod tests {
         assert_eq!(marked_path("__M____M__", "__M__"), None);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn script_quotes_the_program_path() {
-        let script = shell_script(Path::new("/Users/o'neil/my bin/claude"), &["auth", "login"]);
-        assert!(script.contains(r"'/Users/o'\''neil/my bin/claude' 'auth' 'login'"));
-        assert!(script.starts_with("#!/bin/sh\n"));
+    fn a_profile_left_running_in_the_background_does_not_hold_up_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("acm-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stands in for a shell whose profile starts something that keeps the output open.
+        let shell = dir.join("shell");
+        std::fs::write(
+            &shell,
+            format!("#!/bin/sh\nsleep 30 &\nprintf '{MARK}/x/bin{MARK}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let path = shell_path(shell.as_os_str(), Duration::from_secs(10));
+        assert_eq!(path, Some(OsString::from("/x/bin")));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

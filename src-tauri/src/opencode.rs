@@ -300,6 +300,7 @@ fn chat_from(
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_default(),
             limited: false,
+            window_guessed: false,
         }
     });
     let writing = replies

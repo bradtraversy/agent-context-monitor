@@ -112,13 +112,6 @@ pub enum UsageStatus {
     Unknown,
 }
 
-/// Something the user can do on the usage card to get a reading.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageAction {
-    SignIn,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProviderUsage {
     pub provider: &'static str,
@@ -132,7 +125,6 @@ pub struct ProviderUsage {
     pub limits: Vec<Limit>,
     /// The reading is too old to trust as the current value.
     pub stale: bool,
-    pub action: Option<UsageAction>,
 }
 
 /// Live usage is re-checked once the newest reading is this old, which keeps every
@@ -175,7 +167,6 @@ impl ProviderUsage {
             observed_at: Some(observed_at),
             limits,
             stale: false,
-            action: None,
         }
     }
 
@@ -189,7 +180,6 @@ impl ProviderUsage {
             observed_at: None,
             limits: Vec::new(),
             stale: false,
-            action: None,
         }
     }
 
@@ -238,23 +228,41 @@ pub struct ContextMeasure {
     pub observed_at: String,
     /// Measured against the user's own context limit instead of the model's window.
     pub limited: bool,
+    /// The window is a guess from the model name and may really be larger, so the
+    /// percentage can be far too high. It doesn't color the tray or send alerts.
+    pub window_guessed: bool,
 }
 
 impl ContextMeasure {
-    /// Measures against `limit` when it is set and smaller than the model's window.
+    /// Measures against `limit` when it is set and smaller than the model's window, or
+    /// whenever the window is only a guess, since the user's own limit is known.
     pub fn with_limit(mut self, limit: Option<u64>) -> Self {
         if let Some(limit) = limit.filter(|&l| l > 0)
-            && self.context_window.is_none_or(|w| limit < w)
+            && (self.window_guessed || self.context_window.is_none_or(|w| limit < w))
         {
             self.context_window = Some(limit);
             self.used_percent = Some((self.used_tokens as f64 / limit as f64 * 100.0).min(100.0));
             self.limited = true;
+            self.window_guessed = false;
         }
         self
     }
 
+    /// Measures against the window the agent itself reported, replacing any guess.
+    pub fn with_window(mut self, window: u64) -> Self {
+        self.context_window = Some(window);
+        self.used_percent = Some((self.used_tokens as f64 / window as f64 * 100.0).min(100.0));
+        self.window_guessed = false;
+        self
+    }
+
+    /// The share of the window used, when the window is known well enough to warn on.
+    pub fn trusted_percent(&self) -> Option<f64> {
+        self.used_percent.filter(|_| !self.window_guessed)
+    }
+
     pub fn level(&self) -> Level {
-        self.used_percent
+        self.trusted_percent()
             .map(Level::from_used_percent)
             .unwrap_or_default()
     }
@@ -370,7 +378,9 @@ impl Snapshot {
     }
 }
 
-/// Providers report reset times with a little jitter between readings.
+/// How far apart two reset times can be and still mean the same window. Readings of one
+/// window drift by seconds; the slack is an hour to be safe, which still can't merge two
+/// different windows, since the shortest one is five hours.
 pub const RESET_JITTER_SECS: i64 = 60 * 60;
 
 /// Two reset times within the jitter are the same window.
@@ -422,6 +432,7 @@ mod tests {
             confidence: Confidence::Estimated,
             observed_at: String::new(),
             limited: false,
+            window_guessed: false,
         };
         let limited = measure(Some(1_000_000)).with_limit(Some(300_000));
         assert_eq!(limited.context_window, Some(300_000));
@@ -434,6 +445,27 @@ mod tests {
         assert!(!small.limited);
         let none = measure(Some(1_000_000)).with_limit(None);
         assert_eq!(none.used_percent, Some(15.0));
+    }
+
+    #[test]
+    fn a_guessed_window_stays_quiet_unless_the_user_set_a_limit() {
+        let guessed = ContextMeasure {
+            used_tokens: 190_000,
+            context_window: Some(200_000),
+            used_percent: Some(95.0),
+            confidence: Confidence::Estimated,
+            observed_at: String::new(),
+            limited: false,
+            window_guessed: true,
+        };
+        assert_eq!(guessed.trusted_percent(), None);
+        assert_eq!(guessed.level(), Level::Unknown);
+        assert_eq!(guessed.clone().with_limit(None).level(), Level::Unknown);
+        // The user's own limit is known, even when it is above the guess.
+        let limited = guessed.with_limit(Some(300_000));
+        assert_eq!(limited.context_window, Some(300_000));
+        assert!(limited.limited && !limited.window_guessed);
+        assert_eq!(limited.level(), Level::Ok);
     }
 
     #[test]
@@ -453,6 +485,7 @@ mod tests {
                 confidence: Confidence::Confirmed,
                 observed_at: String::new(),
                 limited: false,
+                window_guessed: false,
             }),
             last_activity: unix_secs(now) - age,
             subagents: 0,

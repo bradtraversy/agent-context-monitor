@@ -77,7 +77,8 @@ impl Alerts {
 
         let mut full = HashSet::new();
         for chat in &snapshot.chats {
-            let Some(used) = chat.context.as_ref().and_then(|c| c.used_percent) else {
+            // A guessed window can make the percentage far too high, so it stays quiet.
+            let Some(used) = chat.context.as_ref().and_then(|c| c.trusted_percent()) else {
                 continue;
             };
             // Old chats stay quiet until they are used again, like the tray.
@@ -177,6 +178,7 @@ mod tests {
                 confidence: Confidence::Estimated,
                 observed_at: String::new(),
                 limited: true,
+                window_guessed: false,
             }),
             last_activity: unix_secs(now()) - age,
             subagents: 0,
@@ -223,6 +225,21 @@ mod tests {
         assert_eq!(Alerts::load(path.clone()).check(&full(), now()).len(), 1);
         assert!(Alerts::load(path.clone()).check(&full(), now()).is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_guessed_window_does_not_alert() {
+        let mut alerts = Alerts::default();
+        let mut guessed = chat(99.0, 10);
+        if let Some(c) = guessed.context.as_mut() {
+            c.limited = false;
+            c.window_guessed = true;
+        }
+        assert!(
+            alerts
+                .check(&snapshot(vec![], vec![guessed]), now())
+                .is_empty()
+        );
     }
 
     #[test]

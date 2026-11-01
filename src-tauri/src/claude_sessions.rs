@@ -361,6 +361,8 @@ fn measure(used: u64, model: Option<&str>, observed_at: String) -> ContextMeasur
         confidence: Confidence::Estimated,
         observed_at,
         limited: false,
+        // Plain model names run with the 1M window too, so 200k is only a guess.
+        window_guessed: window == Some(TWO_HUNDRED_K),
     }
 }
 
@@ -529,6 +531,9 @@ mod tests {
             Some(TWO_HUNDRED_K)
         );
         assert_eq!(window("claude-haiku-5-5").used_percent, Some(0.5));
+        // Only the plain 200k is a guess; `[1m]` says the window outright.
+        assert!(window("claude-opus-5-5").window_guessed);
+        assert!(!window("claude-opus-5-5[1m]").window_guessed);
         let big = read(&[assistant("some-other-model", 1, 299_999, "")])
             .context
             .unwrap();
@@ -546,6 +551,7 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.context_window, Some(ONE_MILLION));
         assert_eq!(ctx.used_percent, Some(30.0));
+        assert!(!ctx.window_guessed);
     }
 
     #[test]

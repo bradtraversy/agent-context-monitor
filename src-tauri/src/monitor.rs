@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -9,31 +9,20 @@ use tauri_plugin_notification::NotificationExt;
 
 use crate::alerts::Alerts;
 
-use crate::claude::ClaudeSource;
+use crate::claude_bridge::{self, ClaudeBridge};
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
-use crate::codex_live;
+use crate::codex_live::CodexLive;
 use crate::copilot::CopilotSource;
 use crate::cursor::CursorSource;
-use crate::history::Recorder;
-use crate::model::{
-    LIVE_REFRESH_AFTER_SECS, ProviderInfo, ProviderUsage, Snapshot, UsageStatus, unix_secs,
-};
+use crate::history::{self, Recorder};
+use crate::model::{ProviderInfo, ProviderUsage, Snapshot, UsageStatus};
 use crate::opencode::OpenCodeChats;
 use crate::settings::Settings;
-use crate::sources;
+use crate::sources::{self, FirstChecks, Latest, UsageSource};
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const LIVE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-/// How often the Claude check looks for a reason to ask Claude for fresh usage.
-const CLAUDE_TICK: Duration = Duration::from_secs(1);
-/// While a Claude chat is being used, usage is checked this often so the numbers keep up.
-const CLAUDE_ACTIVE_GAP_SECS: i64 = 20;
-/// Opening the window re-checks usage unless it was checked this recently.
-const CLAUDE_OPEN_GAP_SECS: i64 = 5;
-/// How often to look for a new sign-in after the saved login stopped working.
-const LOGIN_PROBE_SECS: i64 = 30;
 /// How long the window keeps its loading spinner waiting for the first live checks, so it
 /// opens on fresh numbers instead of old ones from session files.
 const FIRST_CHECK_WAIT: Duration = Duration::from_secs(15);
@@ -51,13 +40,14 @@ pub struct HistoryFile(pub PathBuf);
 pub fn start(app: AppHandle) {
     let home = std::env::home_dir().unwrap_or_default();
     let claude_home = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
-    // The Claude desktop app's record of its Code chats, in its own config folder.
-    let desktop_sessions = app
+    // The Claude desktop app's config folder, with its record of its Code chats and the
+    // history behind its usage meter.
+    let claude_desktop = app
         .path()
         .config_dir()
         .unwrap_or_else(|_| home.join(".config"))
-        .join("Claude")
-        .join("claude-code-sessions");
+        .join("Claude");
+    let desktop_sessions = claude_desktop.join("claude-code-sessions");
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
     let data_dir = app
         .path()
@@ -66,139 +56,79 @@ pub fn start(app: AppHandle) {
     let history_path = data_dir.join("usage-history.jsonl");
     app.manage(HistoryFile(history_path.clone()));
 
+    let bridge_dir = data_dir.join("claude-statusline");
+
     // Live usage checks are slow, so they run apart from the file loop and only when
     // the newest reading is about to go stale.
     let started = Instant::now();
-    let first_checks_done = Arc::new(AtomicUsize::new(0));
-    let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home.clone())));
-    let check_now = Arc::clone(&app.state::<CheckNow>().0);
-    // Unix seconds of the last write to any Claude chat, so usage follows Claude in use.
-    let newest_claude_chat = Arc::new(AtomicI64::new(i64::MIN));
-    {
-        let claude = Arc::clone(&claude);
-        let first_checks_done = Arc::clone(&first_checks_done);
-        let newest_claude_chat = Arc::clone(&newest_claude_chat);
-        thread::spawn(move || {
-            let mut source = claude.lock().unwrap().clone();
-            let mut last_check = i64::MIN;
-            let mut last_login_probe = i64::MIN;
-            let mut first = true;
-            let mut seen_open = check_now.load(Ordering::Relaxed);
-            loop {
-                let now = SystemTime::now();
-                let secs = unix_secs(now);
-                let open_count = check_now.load(Ordering::Relaxed);
-                let reason = CheckReason {
-                    opened: std::mem::replace(&mut seen_open, open_count) != open_count,
-                    chat_active: newest_claude_chat.load(Ordering::Relaxed) >= last_check,
-                };
-                let mut due = claude_check_due(secs, last_check, reason, source.backing_off(now));
-                if !due && secs.saturating_sub(last_login_probe) >= LOGIN_PROBE_SECS {
-                    last_login_probe = secs;
-                    due = source.login_changed();
-                }
-                if due {
-                    last_check = secs;
-                    source.refresh(now);
-                    *claude.lock().unwrap() = source.clone();
-                }
-                mark_first_check(&mut first, &first_checks_done);
-                thread::sleep(CLAUDE_TICK);
-            }
-        });
-    }
-
-    let codex_live = Arc::new(Mutex::new(None));
-    // Why the last live check failed, shown when the reading from session files is stale.
-    let codex_problem: Arc<Mutex<Option<&'static str>>> = Arc::default();
+    let first_checks = Arc::new(FirstChecks::default());
+    let opened = Arc::clone(&app.state::<CheckNow>().0);
     let newest_codex_file = Arc::new(AtomicI64::new(i64::MIN));
-    {
-        let codex_live = Arc::clone(&codex_live);
-        let codex_problem = Arc::clone(&codex_problem);
-        let newest_codex_file = Arc::clone(&newest_codex_file);
-        let first_checks_done = Arc::clone(&first_checks_done);
-        thread::spawn(move || {
-            let mut last_check = i64::MIN;
-            let mut first = true;
-            loop {
-                let now = SystemTime::now();
-                // Codex writes fresh readings to its session files while in use, so
-                // starting Codex to ask is only needed when it has been quiet.
-                let newest = last_check.max(newest_codex_file.load(Ordering::Relaxed));
-                if unix_secs(now).saturating_sub(newest) >= LIVE_REFRESH_AFTER_SECS {
-                    last_check = unix_secs(now);
-                    match codex_live::fetch(now) {
-                        Ok(reading) => {
-                            *codex_live.lock().unwrap() = Some(reading);
-                            *codex_problem.lock().unwrap() = None;
-                        }
-                        Err(problem) => *codex_problem.lock().unwrap() = Some(problem),
-                    }
-                }
-                mark_first_check(&mut first, &first_checks_done);
-                thread::sleep(LIVE_CHECK_INTERVAL);
-            }
-        });
-    }
+    let codex_live = sources::spawn(
+        CodexLive {
+            newest_file_reading: Arc::clone(&newest_codex_file),
+        },
+        Arc::clone(&opened),
+        Arc::clone(&first_checks),
+    );
 
     let config_dir = app
         .path()
         .config_dir()
         .unwrap_or_else(|_| home.join(".config"));
-    let opened = Arc::clone(&app.state::<CheckNow>().0);
     let live_sources = [
-        sources::spawn(
-            CopilotSource::new(home.clone()),
-            Arc::clone(&opened),
-            Arc::clone(&first_checks_done),
-        ),
-        sources::spawn(
+        spawn_usage(CopilotSource::new(home.clone()), &opened, &first_checks),
+        spawn_usage(
             CursorSource::new(home.clone(), config_dir),
-            Arc::clone(&opened),
-            Arc::clone(&first_checks_done),
+            &opened,
+            &first_checks,
         ),
     ];
-    // Claude and Codex have their own checks above.
-    let live_source_count = live_sources.len() + 2;
 
     thread::spawn(move || {
         let mut opencode = OpenCodeChats::new(home);
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
+        claude_bridge::connect(&claude_home, &bridge_dir);
+        let recorded_reset = history::last_reset(&history_path, "claude");
+        let mut claude = ClaudeBridge::new(bridge_dir, &claude_desktop, recorded_reset);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
-            if first_checks_done.load(Ordering::Relaxed) < live_source_count
-                && started.elapsed() < FIRST_CHECK_WAIT
-            {
+            if !first_checks.all_done() && started.elapsed() < FIRST_CHECK_WAIT {
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
             let now = SystemTime::now();
+            claude.refresh(now);
             codex.refresh(now);
             if let Some(newest) = codex.newest_file_reading() {
                 newest_codex_file.store(newest, Ordering::Relaxed);
             }
-            let live = codex_live.lock().unwrap().clone();
+            let live = codex_live.lock().unwrap().clone().unwrap_or_default();
             let mut usage = vec![
-                claude.lock().unwrap().usage(now).with_staleness(now),
+                // Claude's numbers only change while Claude Code is in use, and it hands
+                // them over after every reply, so the last reading is still the current one.
+                claude.usage(now),
                 with_problem(
-                    codex.usage(now, live.as_ref()).with_staleness(now),
-                    *codex_problem.lock().unwrap(),
+                    codex
+                        .usage(now, live.last_good.as_ref())
+                        .with_staleness(now),
+                    live.problem.as_deref(),
                 ),
             ];
             // Readings age between checks, so staleness is worked out again each time.
-            usage.extend(
-                live_sources
-                    .iter()
-                    .filter_map(|l| l.lock().unwrap().clone())
-                    .map(|u| u.with_staleness(now)),
-            );
+            usage.extend(live_sources.iter().filter_map(|(info, latest)| {
+                let readings = latest.lock().unwrap().clone()?;
+                Some(readings.usage(info).with_staleness(now))
+            }));
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
-            if let Some(newest) = chats.iter().map(|c| c.last_activity).max() {
-                newest_claude_chat.store(newest, Ordering::Relaxed);
+            for chat in &mut chats {
+                if let Some(window) = claude.context_window(&chat.id) {
+                    chat.context = chat.context.take().map(|c| c.with_window(window));
+                }
             }
             chats.extend(codex.chats(now));
             chats.extend(opencode.chats(now));
@@ -235,34 +165,15 @@ pub fn start(app: AppHandle) {
     });
 }
 
-#[derive(Clone, Copy, Default)]
-struct CheckReason {
-    /// The window was just opened.
-    opened: bool,
-    /// A Claude chat was written to since the last check.
-    chat_active: bool,
-}
-
-/// Whether to ask Claude for fresh usage now. The regular check keeps readings under the
-/// freshness limit; opening the window or using Claude checks sooner, unless Claude has
-/// asked for fewer checks.
-fn claude_check_due(now: i64, last_check: i64, reason: CheckReason, backing_off: bool) -> bool {
-    let age = now.saturating_sub(last_check);
-    if age >= LIVE_REFRESH_AFTER_SECS {
-        return true;
-    }
-    if backing_off {
-        return false;
-    }
-    (reason.opened && age >= CLAUDE_OPEN_GAP_SECS)
-        || (reason.chat_active && age >= CLAUDE_ACTIVE_GAP_SECS)
-}
-
-/// Counts a live source's first check, done or failed, so the window can stop waiting on it.
-fn mark_first_check(first: &mut bool, done: &AtomicUsize) {
-    if std::mem::take(first) {
-        done.fetch_add(1, Ordering::Relaxed);
-    }
+/// Starts the live check of an agent that only reports usage, kept with its name.
+fn spawn_usage<S: UsageSource<Reading = ProviderUsage>>(
+    source: S,
+    opened: &Arc<AtomicU64>,
+    first_checks: &Arc<FirstChecks>,
+) -> (ProviderInfo, Latest<ProviderUsage>) {
+    let info = source.info();
+    let latest = sources::spawn(source, Arc::clone(opened), Arc::clone(first_checks));
+    (info, latest)
 }
 
 /// Says why a live check failed on a card whose reading is out of date or missing.
@@ -298,19 +209,6 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    const OPENED: CheckReason = CheckReason {
-        opened: true,
-        chat_active: false,
-    };
-    const ACTIVE: CheckReason = CheckReason {
-        opened: false,
-        chat_active: true,
-    };
-    const QUIET: CheckReason = CheckReason {
-        opened: false,
-        chat_active: false,
-    };
-
     #[test]
     fn a_failed_live_check_explains_only_an_old_or_missing_reading() {
         let problem = Some("Codex didn't answer.");
@@ -323,60 +221,5 @@ mod tests {
         assert_eq!(with_problem(old, problem).note.as_deref(), problem);
         let missing = ProviderUsage::unknown("codex", "Codex", "No Codex usage.");
         assert_eq!(with_problem(missing, problem).note.as_deref(), problem);
-    }
-
-    #[test]
-    fn first_check_runs_right_away() {
-        assert!(claude_check_due(1000, i64::MIN, QUIET, false));
-    }
-
-    #[test]
-    fn quiet_usage_is_checked_before_it_goes_stale() {
-        assert!(!claude_check_due(
-            1000 + LIVE_REFRESH_AFTER_SECS - 1,
-            1000,
-            QUIET,
-            false
-        ));
-        assert!(claude_check_due(
-            1000 + LIVE_REFRESH_AFTER_SECS,
-            1000,
-            QUIET,
-            false
-        ));
-    }
-
-    #[test]
-    fn opening_the_window_checks_unless_just_checked() {
-        assert!(!claude_check_due(1003, 1000, OPENED, false));
-        assert!(claude_check_due(
-            1000 + CLAUDE_OPEN_GAP_SECS,
-            1000,
-            OPENED,
-            false
-        ));
-    }
-
-    #[test]
-    fn claude_in_use_is_checked_often() {
-        assert!(!claude_check_due(1010, 1000, ACTIVE, false));
-        assert!(claude_check_due(
-            1000 + CLAUDE_ACTIVE_GAP_SECS,
-            1000,
-            ACTIVE,
-            false
-        ));
-    }
-
-    #[test]
-    fn backing_off_keeps_only_the_regular_check() {
-        assert!(!claude_check_due(1100, 1000, OPENED, true));
-        assert!(!claude_check_due(1100, 1000, ACTIVE, true));
-        assert!(claude_check_due(
-            1000 + LIVE_REFRESH_AFTER_SECS,
-            1000,
-            QUIET,
-            true
-        ));
     }
 }

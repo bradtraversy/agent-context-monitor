@@ -17,7 +17,6 @@ interface ProviderUsage {
   observed_at: string | null;
   limits: { id: string; label: string; short: string; window: LimitWindow }[];
   stale: boolean;
-  action: "sign_in" | null;
 }
 
 interface ContextMeasure {
@@ -27,6 +26,7 @@ interface ContextMeasure {
   confidence: "confirmed" | "estimated";
   observed_at: string;
   limited: boolean;
+  window_guessed: boolean;
 }
 
 interface ChatContext {
@@ -87,8 +87,6 @@ let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
-// Why the last Sign in click couldn't open a terminal, by provider.
-const signInErrors = new Map<string, string>();
 
 // The same thresholds as the tray and alerts, which the app sends with each snapshot.
 function levelFor(used: number): Level {
@@ -168,15 +166,9 @@ function usageCard(u: ProviderUsage): string {
       ? u.limits.map((l) => limitRow(l.label, l.window)).join("")
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
-  const error = signInErrors.get(u.provider);
-  const action =
-    u.action === "sign_in"
-      ? `<button class="action" data-sign-in="${escape(u.provider)}">Sign in</button>` +
-        (error ? `<p class="note">${escape(error)}</p>` : "")
-      : "";
   return `<article class="card" data-stale="${u.stale}">
     <h2>${escape(u.name)} ${plan}</h2>
-    ${body}${note}${action}
+    ${body}${note}
     <div class="meta">${observed}</div>
   </article>`;
 }
@@ -194,13 +186,20 @@ function chatRow(c: ChatContext): string {
   let gauge = `<div class="sub">Context unknown until the next reply</div>`;
   const m = c.context;
   if (m && m.used_percent !== null && m.context_window !== null) {
-    const level = levelFor(m.used_percent);
+    // A guessed window may really be 1M, so it gets no warning color.
+    const level = m.window_guessed ? "unknown" : levelFor(m.used_percent);
     const left = Math.max(0, 100 - m.used_percent);
     const over = m.used_tokens - m.context_window;
     const tag = over > 0 ? (m.limited ? "Over your limit" : "Over the window") : LEVEL_TEXT[level];
     const warn = tag ? ` <strong class="tag">${tag}</strong>` : "";
     const headline = over > 0 ? `${over.toLocaleString()} tokens over` : `${left.toFixed(0)}% left`;
-    const estimated = m.limited ? " (your limit)" : m.confidence === "estimated" ? " (estimated)" : "";
+    const estimated = m.limited
+      ? " (your limit)"
+      : m.window_guessed
+        ? " (window guessed, may be 1M)"
+        : m.confidence === "estimated"
+          ? " (estimated)"
+          : "";
     gauge = `<div class="limit-head"><span>Context</span>
         <span><b>${headline}</b>${warn}</span></div>
       ${bar(m.used_percent, level)}
@@ -258,17 +257,6 @@ function render() {
   chatList.innerHTML =
     (shown.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`) + more;
 }
-
-usagePanel.addEventListener("click", (e) => {
-  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-sign-in]");
-  if (!button) return;
-  const provider = button.dataset.signIn!;
-  // The card fills in by itself once the sign-in finishes.
-  invoke("sign_in", { provider })
-    .then(() => signInErrors.delete(provider))
-    .catch((error) => signInErrors.set(provider, String(error)))
-    .finally(render);
-});
 
 chatList.addEventListener("click", (e) => {
   if (!(e.target as HTMLElement).closest(".more")) return;

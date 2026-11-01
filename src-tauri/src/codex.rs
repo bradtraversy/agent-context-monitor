@@ -27,7 +27,7 @@ const LOOKBACK: Duration = Duration::from_secs(8 * 24 * 60 * 60);
 const SESSION_WINDOW_MAX_MINUTES: u64 = 24 * 60;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RateReading {
+pub struct RateReading {
     pub observed_at: String,
     pub plan: Option<String>,
     pub windows: Vec<RateWindow>,
@@ -311,6 +311,7 @@ impl SessionFile {
                 confidence,
                 observed_at: observed_at.clone(),
                 limited: false,
+                window_guessed: false,
             });
         }
         if let Some(limits) = payload.rate_limits
