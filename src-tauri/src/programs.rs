@@ -91,7 +91,8 @@ fn read_login_shell_path() -> Option<OsString> {
 fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
     use std::io::Read;
     use std::sync::mpsc;
-    let mut child = Command::new(shell)
+    let mut command = Command::new(shell);
+    command
         .args([
             "-l",
             "-i",
@@ -100,9 +101,19 @@ fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // An interactive shell takes over the terminal ACM was started from and doesn't hand
+    // it back, which leaves Ctrl+C there going nowhere. In its own session it has no
+    // terminal to take.
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().ok()?;
     // Read as the output arrives instead of after the shell exits: something the profile
     // starts in the background can keep the output open long after, and waiting for it
     // to close would never finish.
