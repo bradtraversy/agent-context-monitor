@@ -37,22 +37,17 @@ pub struct CheckNow(pub Arc<AtomicU64>);
 /// Where usage readings are kept so the History tab can chart them.
 pub struct HistoryFile(pub PathBuf);
 
-/// Claude Code's config folder, and where its status line hands usage to ACM.
-pub struct ClaudePaths {
-    pub claude_home: PathBuf,
-    pub bridge_dir: PathBuf,
-}
-
 pub fn start(app: AppHandle) {
     let home = std::env::home_dir().unwrap_or_default();
     let claude_home = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
-    // The Claude desktop app's record of its Code chats, in its own config folder.
-    let desktop_sessions = app
+    // The Claude desktop app's config folder, with its record of its Code chats and the
+    // history behind its usage meter.
+    let claude_desktop = app
         .path()
         .config_dir()
         .unwrap_or_else(|_| home.join(".config"))
-        .join("Claude")
-        .join("claude-code-sessions");
+        .join("Claude");
+    let desktop_sessions = claude_desktop.join("claude-code-sessions");
     let codex_home = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
     let data_dir = app
         .path()
@@ -62,10 +57,6 @@ pub fn start(app: AppHandle) {
     app.manage(HistoryFile(history_path.clone()));
 
     let bridge_dir = data_dir.join("claude-statusline");
-    app.manage(ClaudePaths {
-        claude_home: claude_home.clone(),
-        bridge_dir: bridge_dir.clone(),
-    });
 
     // Live usage checks are slow, so they run apart from the file loop and only when
     // the newest reading is about to go stale.
@@ -98,8 +89,8 @@ pub fn start(app: AppHandle) {
         let mut opencode = OpenCodeChats::new(home);
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
-        claude_bridge::keep_connected_here(&claude_home, &bridge_dir);
-        let mut claude = ClaudeBridge::new(bridge_dir, &claude_home);
+        claude_bridge::connect(&claude_home, &bridge_dir);
+        let mut claude = ClaudeBridge::new(bridge_dir, &claude_desktop);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {

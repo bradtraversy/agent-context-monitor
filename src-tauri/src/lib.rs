@@ -24,7 +24,7 @@ use tauri::{Manager, WindowEvent};
 
 use crate::history::{Period, ProviderHistory};
 use crate::model::Snapshot;
-use crate::monitor::{CheckNow, ClaudePaths, HistoryFile, SharedSnapshot};
+use crate::monitor::{CheckNow, HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
 
 #[tauri::command]
@@ -36,16 +36,6 @@ fn get_snapshot(state: tauri::State<SharedSnapshot>) -> Snapshot {
 #[tauri::command(async)]
 fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
-}
-
-/// Turns on usage for a provider whose usage card asked for it. Off the window's thread,
-/// since it edits the agent's settings file.
-#[tauri::command(async)]
-fn turn_on_usage(paths: tauri::State<ClaudePaths>, provider: String) -> Result<(), String> {
-    match provider.as_str() {
-        "claude" => claude_bridge::turn_on(&paths.claude_home, &paths.bridge_dir),
-        _ => Err(format!("Turning on {provider} usage isn't supported.")),
-    }
 }
 
 // Off the window's thread, since it reads the whole history file.
@@ -151,8 +141,7 @@ pub fn run() {
             get_snapshot,
             get_history,
             set_context_limit,
-            resize_window,
-            turn_on_usage
+            resize_window
         ])
         .setup(|app| {
             // A menu bar app on macOS, so no Dock icon next to the tray dot.

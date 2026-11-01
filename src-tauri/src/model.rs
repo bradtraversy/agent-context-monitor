@@ -112,14 +112,6 @@ pub enum UsageStatus {
     Unknown,
 }
 
-/// Something the user can do on the usage card to get a reading.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageAction {
-    /// Have the agent share its usage with ACM, which changes the agent's settings.
-    TurnOn,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProviderUsage {
     pub provider: &'static str,
@@ -133,7 +125,6 @@ pub struct ProviderUsage {
     pub limits: Vec<Limit>,
     /// The reading is too old to trust as the current value.
     pub stale: bool,
-    pub action: Option<UsageAction>,
 }
 
 /// Live usage is re-checked once the newest reading is this old, which keeps every
@@ -176,7 +167,6 @@ impl ProviderUsage {
             observed_at: Some(observed_at),
             limits,
             stale: false,
-            action: None,
         }
     }
 
@@ -190,7 +180,6 @@ impl ProviderUsage {
             observed_at: None,
             limits: Vec::new(),
             stale: false,
-            action: None,
         }
     }
 

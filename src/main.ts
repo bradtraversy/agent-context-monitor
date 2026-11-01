@@ -17,7 +17,6 @@ interface ProviderUsage {
   observed_at: string | null;
   limits: { id: string; label: string; short: string; window: LimitWindow }[];
   stale: boolean;
-  action: "turn_on" | null;
 }
 
 interface ContextMeasure {
@@ -88,8 +87,6 @@ let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
-// Why the last Connect click failed, by provider.
-const actionErrors = new Map<string, string>();
 
 // The same thresholds as the tray and alerts, which the app sends with each snapshot.
 function levelFor(used: number): Level {
@@ -169,15 +166,9 @@ function usageCard(u: ProviderUsage): string {
       ? u.limits.map((l) => limitRow(l.label, l.window)).join("")
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
-  const error = actionErrors.get(u.provider);
-  const action =
-    u.action === "turn_on"
-      ? `<button class="action" data-turn-on="${escape(u.provider)}">Connect</button>` +
-        (error ? `<p class="note">${escape(error)}</p>` : "")
-      : "";
   return `<article class="card" data-stale="${u.stale}">
     <h2>${escape(u.name)} ${plan}</h2>
-    ${body}${note}${action}
+    ${body}${note}
     <div class="meta">${observed}</div>
   </article>`;
 }
@@ -266,17 +257,6 @@ function render() {
   chatList.innerHTML =
     (shown.map(chatRow).join("") || `<p class="empty">No ${who} chats in the last 24 hours.</p>`) + more;
 }
-
-usagePanel.addEventListener("click", (e) => {
-  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-turn-on]");
-  if (!button) return;
-  const provider = button.dataset.turnOn!;
-  // The card fills in by itself once the agent shares its usage.
-  invoke("turn_on_usage", { provider })
-    .then(() => actionErrors.delete(provider))
-    .catch((error) => actionErrors.set(provider, String(error)))
-    .finally(render);
-});
 
 chatList.addEventListener("click", (e) => {
   if (!(e.target as HTMLElement).closest(".more")) return;

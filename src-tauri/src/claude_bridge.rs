@@ -1,13 +1,16 @@
-//! Claude plan usage and context windows, handed over by Claude Code itself.
+//! Claude plan usage and context windows, from Claude's own apps. ACM never touches
+//! Claude's login.
 //!
-//! Claude Code runs a status line command after each reply and passes it the session's
-//! usage limits and context window as JSON. With Claude usage turned on, that command is
-//! ACM, run with `--claude-statusline`: it saves the few numbers it needs and prints
-//! nothing, so the status line stays empty. ACM never touches Claude's login.
+//! Claude Code in a terminal runs a status line command after each reply and passes it
+//! the session's usage limits and context window as JSON. ACM sets that command to
+//! itself, run with `--claude-statusline`: it saves the few numbers it needs and prints
+//! nothing, so the status line stays empty. If a status line was already set up, ACM
+//! runs first and hands the same JSON on to it, so that status line keeps working. The
+//! old setting is also saved in ACM's data folder as `previous-statusline.json`.
 //!
-//! If a status line was already set up, ACM runs first and hands the same JSON on to it,
-//! so that status line keeps working. The old setting is also saved in ACM's data folder
-//! as `previous-statusline.json`.
+//! The Claude desktop app doesn't run status lines, but it records the same two
+//! percentages every 15 minutes for its own usage meter, without reset times. Whichever
+//! reading is newer wins.
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::files;
-use crate::model::{Limit, LimitWindow, ProviderUsage, UsageAction, unix_secs};
+use crate::model::{Limit, LimitWindow, ProviderUsage, unix_secs};
 
 const PROVIDER: &str = "claude";
 const NAME: &str = "Claude";
@@ -31,15 +34,13 @@ pub const ARG: &str = "--claude-statusline";
 const PASS_ARG: &str = "--pass";
 /// The status line that was there before, kept so it can be put back by hand.
 const PREVIOUS_FILE: &str = "previous-statusline.json";
-const TURN_ON_HINT: &str =
-    "Connect to let Claude Code share your usage with ACM. Your status line stays the same.";
-const WAITING_HINT: &str = "Claude usage appears after your next reply in Claude Code.";
+const WAITING_HINT: &str = "Claude usage appears after you use Claude Code or the Claude app.";
+/// The desktop app's usage meter history, in its config folder.
+const DESKTOP_FILE: &str = "plan-usage-history.json";
 /// Sessions not heard from in this long are forgotten.
 const KEEP_SESSIONS: Duration = Duration::from_secs(8 * 24 * 60 * 60);
 /// Status line JSON is a few kilobytes; anything far bigger isn't it.
 const MAX_INPUT: u64 = 1024 * 1024;
-/// How often to look at Claude Code's settings to see if the status line is still ACM's.
-const SETTINGS_CHECK_SECS: i64 = 10;
 
 /// The part of Claude Code's status line JSON that ACM keeps.
 #[derive(Deserialize)]
@@ -73,6 +74,28 @@ struct Record {
     received_at: i64,
     context_window: Option<u64>,
     rate_limits: Option<RateLimits>,
+}
+
+/// The desktop app's usage history: one sample every 15 minutes.
+#[derive(Deserialize)]
+struct DesktopHistory {
+    #[serde(default)]
+    samples: Vec<DesktopSample>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct DesktopSample {
+    /// Unix milliseconds.
+    t: i64,
+    u: DesktopUsage,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct DesktopUsage {
+    /// Percent of the 5-hour window used; left out while no window is running.
+    fh: Option<f64>,
+    /// Percent of the weekly window used.
+    sd: Option<f64>,
 }
 
 /// Run by Claude Code as its status line. Returns false when ACM wasn't started that way.
@@ -129,32 +152,47 @@ fn save(dir: &Path, input: &[u8], now: SystemTime) {
 /// Claude usage and context windows from what the status line saved.
 pub struct ClaudeBridge {
     dir: PathBuf,
-    settings_path: PathBuf,
+    desktop_file: PathBuf,
     /// Each session's record, with the file's modified time to skip unchanged files.
     records: HashMap<String, (SystemTime, Record)>,
-    turned_on: bool,
-    last_settings_check: i64,
+    /// The desktop app's newest sample, with the file's modified time.
+    desktop: Option<(SystemTime, Option<DesktopSample>)>,
 }
 
 impl ClaudeBridge {
-    /// `dir` is where ACM keeps what the status line saves; `claude_home` is Claude
-    /// Code's config folder.
-    pub fn new(dir: PathBuf, claude_home: &Path) -> Self {
+    /// `dir` is where ACM keeps what the status line saves; `desktop_dir` is the Claude
+    /// desktop app's config folder.
+    pub fn new(dir: PathBuf, desktop_dir: &Path) -> Self {
         ClaudeBridge {
             dir,
-            settings_path: claude_home.join("settings.json"),
+            desktop_file: desktop_dir.join(DESKTOP_FILE),
             records: HashMap::new(),
-            turned_on: false,
-            last_settings_check: i64::MIN,
+            desktop: None,
         }
     }
 
     pub fn refresh(&mut self, now: SystemTime) {
-        let secs = unix_secs(now);
-        if secs.saturating_sub(self.last_settings_check) >= SETTINGS_CHECK_SECS {
-            self.last_settings_check = secs;
-            self.turned_on = is_turned_on(&self.settings_path);
+        self.refresh_desktop();
+        self.refresh_sessions(now);
+    }
+
+    fn refresh_desktop(&mut self) {
+        let Ok(modified) = fs::metadata(&self.desktop_file).and_then(|m| m.modified()) else {
+            self.desktop = None;
+            return;
+        };
+        if self.desktop.as_ref().is_some_and(|(at, _)| *at == modified) {
+            return;
         }
+        let newest = fs::read(&self.desktop_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<DesktopHistory>(&b).ok())
+            .and_then(|h| h.samples.into_iter().max_by_key(|s| s.t));
+        self.desktop = Some((modified, newest));
+    }
+
+    fn refresh_sessions(&mut self, now: SystemTime) {
+        let secs = unix_secs(now);
         let Ok(entries) = fs::read_dir(sessions_dir(&self.dir)) else {
             self.records.clear();
             return;
@@ -199,49 +237,80 @@ impl ClaudeBridge {
     }
 
     pub fn usage(&self, now: SystemTime) -> ProviderUsage {
-        let newest = self
+        let status_line = self
             .records
             .values()
             .map(|(_, r)| r)
-            .filter(|r| r.rate_limits.is_some())
-            .max_by_key(|r| r.received_at);
-        let Some(record) = newest else {
-            let mut usage = ProviderUsage::unknown(
-                PROVIDER,
-                NAME,
-                if self.turned_on {
-                    WAITING_HINT
-                } else {
-                    TURN_ON_HINT
-                },
-            );
-            usage.action = (!self.turned_on).then_some(UsageAction::TurnOn);
-            return usage;
-        };
+            .filter_map(|r| Some((r.received_at, r.rate_limits.clone()?)))
+            .max_by_key(|(at, _)| *at);
+        let desktop = self
+            .desktop
+            .as_ref()
+            .and_then(|(_, s)| s.clone())
+            .filter(|s| s.u.fh.is_some() || s.u.sd.is_some());
         let now = unix_secs(now);
-        let limits = record.rate_limits.clone().unwrap_or_default();
-        let to_window = |w: Option<Window>| {
-            w.map_or(LimitWindow::NotReported, |w| {
-                LimitWindow::from_reading(w.used_percentage, w.resets_at, now)
-            })
+        let observed = match (&status_line, &desktop) {
+            (None, None) => return ProviderUsage::unknown(PROVIDER, NAME, WAITING_HINT),
+            (Some((at, _)), None) => *at,
+            (None, Some(d)) => d.t / 1000,
+            (Some((at, _)), Some(d)) => (*at).max(d.t / 1000),
         };
-        let mut usage = ProviderUsage::from_reading(
+        let pick = |from_line: Option<&Window>, from_desktop: Option<f64>| {
+            pick_window(
+                status_line.as_ref().map(|(at, _)| *at),
+                from_line,
+                desktop.as_ref().map(|d| d.t / 1000),
+                from_desktop,
+                now,
+            )
+        };
+        let limits = status_line.as_ref().map(|(_, l)| l);
+        // With a weekly reading but no 5-hour one, no 5-hour window is running.
+        let desktop_session = desktop
+            .as_ref()
+            .and_then(|d| d.u.fh.or(d.u.sd.map(|_| 0.0)));
+        ProviderUsage::from_reading(
             PROVIDER,
             NAME,
             vec![
-                Limit::session(to_window(limits.five_hour)),
-                Limit::weekly(to_window(limits.seven_day)),
+                Limit::session(pick(
+                    limits.and_then(|l| l.five_hour.as_ref()),
+                    desktop_session,
+                )),
+                Limit::weekly(pick(
+                    limits.and_then(|l| l.seven_day.as_ref()),
+                    desktop.as_ref().and_then(|d| d.u.sd),
+                )),
             ],
             None,
-            rfc3339(record.received_at),
+            rfc3339(observed),
             "Claude reported no plan limits.",
-        );
-        if !self.turned_on {
-            usage.note =
-                Some("Claude Code isn't connected anymore, so this is the last reading.".into());
-            usage.action = Some(UsageAction::TurnOn);
+        )
+    }
+}
+
+/// One window from the newer of the two readings. The desktop app's has no reset time,
+/// so it borrows the status line's while that one is still ahead.
+fn pick_window(
+    line_at: Option<i64>,
+    line: Option<&Window>,
+    desktop_at: Option<i64>,
+    desktop: Option<f64>,
+    now: i64,
+) -> LimitWindow {
+    let from_line = |w: &Window| LimitWindow::from_reading(w.used_percentage, w.resets_at, now);
+    match (line, desktop) {
+        (None, None) => LimitWindow::NotReported,
+        (Some(w), None) => from_line(w),
+        (None, Some(used)) => LimitWindow::from_reading(used, None, now),
+        (Some(w), Some(used)) => {
+            if line_at >= desktop_at {
+                from_line(w)
+            } else {
+                let reset = w.resets_at.filter(|&r| r > now);
+                LimitWindow::from_reading(used, reset, now)
+            }
         }
-        usage
     }
 }
 
@@ -261,10 +330,6 @@ fn read_settings(path: &Path) -> Result<serde_json::Map<String, Value>, String> 
             _ => Err("Claude Code's settings file isn't plain JSON, so ACM left it alone.".into()),
         },
     }
-}
-
-fn is_turned_on(settings_path: &Path) -> bool {
-    read_settings(settings_path).is_ok_and(|s| status_command(&s).is_some_and(is_ours))
 }
 
 fn status_command(settings: &serde_json::Map<String, Value>) -> Option<&str> {
@@ -334,8 +399,18 @@ pub fn keep_connected_here(claude_home: &Path, dir: &Path) {
     }
 }
 
+/// Has Claude Code share its usage with ACM, once it's installed. Run at startup.
+pub fn connect(claude_home: &Path, dir: &Path) {
+    let settings = read_settings(&claude_home.join("settings.json"));
+    if settings.is_ok_and(|s| status_command(&s).is_some_and(is_ours)) {
+        keep_connected_here(claude_home, dir);
+    } else if claude_home.is_dir() {
+        let _ = turn_on(claude_home, dir);
+    }
+}
+
 /// Points Claude Code's status line at ACM, keeping any status line already set up.
-pub fn turn_on(claude_home: &Path, dir: &Path) -> Result<(), String> {
+fn turn_on(claude_home: &Path, dir: &Path) -> Result<(), String> {
     let exe = own_exe()?;
     let settings_path = claude_home.join("settings.json");
     let mut settings = read_settings(&settings_path)?;
@@ -437,21 +512,90 @@ mod tests {
     }
 
     #[test]
-    fn asks_to_turn_on_until_it_is() {
-        let dir = temp("ask");
-        let home = temp("ask-home");
-        let mut bridge = ClaudeBridge::new(dir.clone(), &home);
-        bridge.refresh(SystemTime::now());
-        let usage = bridge.usage(SystemTime::now());
-        assert_eq!(usage.action, Some(UsageAction::TurnOn));
-        turn_on(&home, &dir).unwrap();
-        bridge.last_settings_check = i64::MIN;
-        bridge.refresh(SystemTime::now());
-        let usage = bridge.usage(SystemTime::now());
-        assert_eq!(usage.action, None);
-        assert_eq!(usage.note.as_deref(), Some(WAITING_HINT));
+    fn connects_claude_code_once_it_is_installed() {
+        let dir = temp("connect");
+        let home = temp("connect-home");
+        let missing = home.join("not-installed");
+        connect(&missing, &dir);
+        assert!(!missing.exists());
+        connect(&home, &dir);
+        let settings = read_settings(&home.join("settings.json")).unwrap();
+        assert!(status_command(&settings).is_some_and(is_ours));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    fn desktop_history(dir: &Path, samples: &str) {
+        fs::write(
+            dir.join(DESKTOP_FILE),
+            format!(r#"{{"version":2,"samples":[{samples}]}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reads_the_desktop_apps_usage_without_any_setup() {
+        let dir = temp("desktop");
+        let desktop = temp("desktop-app");
+        desktop_history(
+            &desktop,
+            r#"{"t":1899999000000,"org":"o","u":{"fh":50,"sd":20}},
+               {"t":1899999900000,"org":"o","u":{"sd":21}}"#,
+        );
+        let now = epoch(1_900_000_000);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop);
+        bridge.refresh(now);
+        let usage = bridge.usage(now);
+        assert_eq!(usage.status, UsageStatus::Available);
+        assert_eq!(
+            usage.limit("weekly"),
+            Some(&LimitWindow::Reported {
+                used_percent: 21.0,
+                resets_at: None
+            })
+        );
+        // No 5-hour figure next to a weekly one means no 5-hour window is running.
+        assert_eq!(
+            usage.limit("session"),
+            Some(&LimitWindow::Reported {
+                used_percent: 0.0,
+                resets_at: None
+            })
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&desktop);
+    }
+
+    #[test]
+    fn the_newer_reading_wins_and_keeps_a_known_reset_time() {
+        let dir = temp("newer");
+        let desktop = temp("newer-app");
+        // Status line at 1_899_999_000, desktop app 500 s later.
+        save(&dir, INPUT.as_bytes(), epoch(1_899_999_000));
+        desktop_history(&desktop, r#"{"t":1899999500000,"u":{"fh":30,"sd":45}}"#);
+        let now = epoch(1_900_000_000);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop);
+        bridge.refresh(now);
+        let usage = bridge.usage(now);
+        assert_eq!(
+            usage.limit("weekly"),
+            Some(&LimitWindow::Reported {
+                used_percent: 45.0,
+                resets_at: Some(1_900_500_000)
+            })
+        );
+        // Then a terminal reply comes in, newer than the desktop sample.
+        save(&dir, INPUT.as_bytes(), now);
+        bridge.refresh(now);
+        assert_eq!(
+            bridge.usage(now).limit("weekly"),
+            Some(&LimitWindow::Reported {
+                used_percent: 41.2,
+                resets_at: Some(1_900_500_000)
+            })
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&desktop);
     }
 
     #[test]

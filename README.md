@@ -26,7 +26,7 @@ Or download the installer yourself from the [latest release](https://github.com/
 - Windows: the `-setup.exe` or the `.msi`. If Windows shows "Windows protected your PC", click More info, then Run anyway.
 - Linux: the `.deb` (Ubuntu, Debian), the `.rpm` (Fedora), or the `.AppImage` (any distro, make it executable and run it).
 
-You need at least one of them installed and logged in. The app picks them up on its own. The one exception is Claude usage: click Connect on the Claude card once, and Claude Code starts sharing its usage with the app (see below).
+You need at least one of them installed and logged in. The app picks them up on its own, there's nothing to set up.
 
 ## What it shows
 
@@ -44,12 +44,12 @@ On Linux, use the tray menu to open the window or quit. GNOME needs the AppIndic
 
 ## Privacy
 
-Everything runs on your computer, read-only apart from the one Claude Code setting that Connect adds. The app reads chat metadata (title, model, token counts) from Claude Code, Codex, and OpenCode's local files, never message content. The only network calls are the usage checks, each a read-only request every few minutes using a login already saved on your computer: Codex's own check through the installed Codex, GitHub for Copilot, and Cursor for Cursor. The app never reads or uses your Claude login, and the other login tokens are never logged or stored. For the History tab it keeps a small log of usage percentages in its data folder, trimmed to 120 days.
+Everything runs on your computer, read-only apart from one Claude Code setting the app adds so Claude Code can hand it usage (see below). The app reads chat metadata (title, model, token counts) from Claude Code, Codex, and OpenCode's local files, never message content. The only network calls are the usage checks, each a read-only request every few minutes using a login already saved on your computer: Codex's own check through the installed Codex, GitHub for Copilot, and Cursor for Cursor. The app never reads or uses your Claude login, and the other login tokens are never logged or stored. For the History tab it keeps a small log of usage percentages in its data folder, trimmed to 120 days.
 
 <details>
 <summary>Where the data comes from</summary>
 
-- Claude usage: Claude Code itself. Connect adds a `statusLine` entry to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) that runs the app after each Claude Code reply. Claude Code passes it the session and weekly limits and the context window, the app saves those numbers in its data folder, and prints nothing, so your status line stays empty. If you already had a status line, it keeps working: the app hands the same data on to it, and keeps a copy of your old setting in `claude-statusline/previous-statusline.json` in its data folder. To turn it off, remove the `statusLine` entry (or put your old one back). The numbers update whenever Claude Code is used on this computer, so usage from claude.ai or another computer shows up after your next Claude Code reply here.
+- Claude usage: Claude's own apps, never your Claude login. In the Claude desktop app, from the history behind its usage meter (`plan-usage-history.json` in its config folder, for example `~/.config/Claude` on Linux), which it updates every 15 minutes with no reset times. In a terminal, from Claude Code itself: on startup the app adds a `statusLine` entry to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) that runs the app after each Claude Code reply. Claude Code passes it the session and weekly limits and the context window, the app saves those numbers in its data folder, and prints nothing, so your status line stays empty. If you already had a status line, it keeps working: the app hands the same data on to it, and keeps a copy of your old setting in `claude-statusline/previous-statusline.json` in its data folder. To turn it off, remove the `statusLine` entry (or put your old one back). Whichever of the two readings is newer is shown, so usage from claude.ai or another computer shows up once one of them updates here.
 - Codex usage: the installed Codex's read-only rate limit check (`codex app-server`), the same source as its /status screen, plus the newest `token_count` record in `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Whichever is newer wins. The app finds Codex on the PATH, in the usual install folders, and in the Codex desktop app.
 - Claude chats: open chats from `~/.claude/sessions`, recent ones from transcripts in `~/.claude/projects`, and the Claude desktop app's own chat list so reopened and archived chats are handled the way the app shows them. The context window comes from Claude Code once it's connected. Without it, or for chats Claude Code hasn't reported yet, it's guessed from the model (1M for `[1m]` models or chats already past 200K, otherwise 200K) and marked as a guess; guessed chats don't send alerts or color the tray.
 - Codex chats: `~/.codex/sessions`, titled from `session_index.jsonl`.
@@ -57,7 +57,7 @@ Everything runs on your computer, read-only apart from the one Claude Code setti
 - Cursor usage: the request Cursor's dashboard makes (`cursor.com/api/usage-summary`), signed in with the login Cursor saves in its settings database (read-only) or the Cursor CLI's `auth.json`. Shows the month's included usage, split into Auto and Composer and other models, and when the billing cycle resets.
 - OpenCode chats: OpenCode's database (`~/.local/share/opencode/opencode.db`), read-only, with each model's context window from OpenCode's own model list (`~/.cache/opencode/models.json`). OpenCode runs on your other logins and has no limits of its own, so it has no usage card.
 
-Readings older than five minutes are greyed out and marked as possibly out of date, and they don't color the tray. Claude's are the exception, since they only change while Claude Code is in use and it reports every change.
+Readings older than five minutes are greyed out and marked as possibly out of date, and they don't color the tray. Claude's are the exception, since they only change while Claude is in use and its apps report the changes.
 
 </details>
 
