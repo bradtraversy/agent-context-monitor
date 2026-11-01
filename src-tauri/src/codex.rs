@@ -311,6 +311,7 @@ impl SessionFile {
                 confidence,
                 observed_at: observed_at.clone(),
                 limited: false,
+                window_guessed: false,
             });
         }
         if let Some(limits) = payload.rate_limits
