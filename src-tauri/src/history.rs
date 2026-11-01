@@ -137,6 +137,15 @@ fn line(sample: &Sample) -> String {
     serde_json::to_string(sample).unwrap_or_default() + "\n"
 }
 
+/// The newest reset time recorded for a provider's charted limit.
+pub fn last_reset(path: &PathBuf, provider: &str) -> Option<i64> {
+    read_samples(path)
+        .into_iter()
+        .rev()
+        .find(|s| s.p == provider && s.r.is_some())
+        .and_then(|s| s.r)
+}
+
 fn read_samples(path: &PathBuf) -> Vec<Sample> {
     let text = fs::read_to_string(path).unwrap_or_default();
     let mut samples: Vec<Sample> = text

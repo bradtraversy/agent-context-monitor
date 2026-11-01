@@ -35,6 +35,9 @@ const PASS_ARG: &str = "--pass";
 /// The status line that was there before, kept so it can be put back by hand.
 const PREVIOUS_FILE: &str = "previous-statusline.json";
 const WAITING_HINT: &str = "Claude usage appears after you use Claude Code or the Claude app.";
+const ESTIMATED_RESET_NOTE: &str = "Some reset times are worked out from the Claude app's history.";
+/// Where the last exact weekly reset time is saved, in ACM's data folder.
+const WEEKLY_RESET_FILE: &str = "weekly-reset.json";
 /// The desktop app's usage meter history, in its config folder.
 const DESKTOP_FILE: &str = "plan-usage-history.json";
 /// Sessions not heard from in this long are forgotten.
@@ -87,7 +90,74 @@ struct DesktopHistory {
 struct DesktopSample {
     /// Unix milliseconds.
     t: i64,
+    /// The account's organization, since one app can switch between several.
+    org: Option<String>,
     u: DesktopUsage,
+}
+
+/// The desktop app's newest reading, plus when its windows last started, worked out
+/// from the history since the file has no reset times.
+#[derive(Clone, Debug, PartialEq)]
+struct DesktopReading {
+    newest: DesktopSample,
+    /// Unix seconds when the weekly window last reset, to within a sample.
+    week_started: Option<i64>,
+    /// Unix seconds when the current 5-hour window started, to within a sample.
+    session_started: Option<i64>,
+}
+
+const HOUR: i64 = 60 * 60;
+const WEEK_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// The first weekly reset after `now`, in whole weeks from a known one. The weekly
+/// window resets at the same time each week.
+fn next_weekly_reset(known: i64, now: i64) -> i64 {
+    known + ((now - known).div_euclid(WEEK_SECS) + 1) * WEEK_SECS
+}
+const SESSION_SECS: i64 = 5 * 60 * 60;
+
+impl DesktopReading {
+    fn from_history(mut samples: Vec<DesktopSample>) -> Option<Self> {
+        samples.sort_by_key(|s| s.t);
+        let newest = samples.last()?.clone();
+        let samples: Vec<&DesktopSample> = samples.iter().filter(|s| s.org == newest.org).collect();
+        // Claude's windows start on the hour, so a change first seen in a sample happened
+        // at the top of that sample's hour (samples are at most an hour apart).
+        let between = |_: &DesktopSample, b: &DesktopSample| (b.t / 1000).div_euclid(HOUR) * HOUR;
+        // The weekly figure only ever falls when the week resets.
+        let week_started = samples.windows(2).rev().find_map(|pair| {
+            let (Some(before), Some(after)) = (pair[0].u.sd, pair[1].u.sd) else {
+                return None;
+            };
+            (after + 1.0 < before || (after == 0.0 && before > 0.0))
+                .then(|| between(pair[0], pair[1]))
+        });
+        // A 5-hour window starts where its figure appears, or falls back after a reset.
+        let session_started = match newest.u.fh {
+            None => None,
+            Some(_) => samples.windows(2).rev().find_map(|pair| {
+                let after = pair[1].u.fh?;
+                let started = pair[0].u.fh.is_none_or(|before| after + 1.0 < before);
+                started.then(|| between(pair[0], pair[1]))
+            }),
+        };
+        Some(DesktopReading {
+            newest,
+            week_started,
+            session_started,
+        })
+    }
+
+    /// The next weekly reset after `now`, counting whole weeks on from the last one.
+    fn weekly_reset(&self, now: i64) -> Option<i64> {
+        self.week_started
+            .map(|started| next_weekly_reset(started, now))
+    }
+
+    /// When the running 5-hour window ends, unless the estimate says it already has.
+    fn session_reset(&self, now: i64) -> Option<i64> {
+        Some(self.session_started? + SESSION_SECS).filter(|&r| r > now)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -155,20 +225,43 @@ pub struct ClaudeBridge {
     desktop_file: PathBuf,
     /// Each session's record, with the file's modified time to skip unchanged files.
     records: HashMap<String, (SystemTime, Record)>,
-    /// The desktop app's newest sample, with the file's modified time.
-    desktop: Option<(SystemTime, Option<DesktopSample>)>,
+    /// The desktop app's reading, with the file's modified time.
+    desktop: Option<(SystemTime, Option<DesktopReading>)>,
+    /// The last exact weekly reset time Claude reported, saved so the desktop app's
+    /// readings can count on from it.
+    weekly_reset: Option<i64>,
 }
 
 impl ClaudeBridge {
     /// `dir` is where ACM keeps what the status line saves; `desktop_dir` is the Claude
-    /// desktop app's config folder.
-    pub fn new(dir: PathBuf, desktop_dir: &Path) -> Self {
-        ClaudeBridge {
+    /// desktop app's config folder. `recorded_reset` is the newest weekly reset ACM's
+    /// usage history has, used once if no exact one was saved yet.
+    pub fn new(dir: PathBuf, desktop_dir: &Path, recorded_reset: Option<i64>) -> Self {
+        let saved = fs::read(dir.join(WEEKLY_RESET_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<i64>(&b).ok());
+        let mut bridge = ClaudeBridge {
             dir,
             desktop_file: desktop_dir.join(DESKTOP_FILE),
             records: HashMap::new(),
             desktop: None,
+            weekly_reset: saved,
+        };
+        if saved.is_none()
+            && let Some(reset) = recorded_reset
+        {
+            bridge.save_weekly_reset(reset);
         }
+        bridge
+    }
+
+    fn save_weekly_reset(&mut self, reset: i64) {
+        self.weekly_reset = Some(reset);
+        let _ = fs::create_dir_all(&self.dir);
+        let _ = files::replace(
+            &self.dir.join(WEEKLY_RESET_FILE),
+            reset.to_string().as_bytes(),
+        );
     }
 
     pub fn refresh(&mut self, now: SystemTime) {
@@ -184,11 +277,11 @@ impl ClaudeBridge {
         if self.desktop.as_ref().is_some_and(|(at, _)| *at == modified) {
             return;
         }
-        let newest = fs::read(&self.desktop_file)
+        let reading = fs::read(&self.desktop_file)
             .ok()
             .and_then(|b| serde_json::from_slice::<DesktopHistory>(&b).ok())
-            .and_then(|h| h.samples.into_iter().max_by_key(|s| s.t));
-        self.desktop = Some((modified, newest));
+            .and_then(|h| DesktopReading::from_history(h.samples));
+        self.desktop = Some((modified, reading));
     }
 
     fn refresh_sessions(&mut self, now: SystemTime) {
@@ -226,6 +319,23 @@ impl ClaudeBridge {
             seen.insert(id, (modified, record));
         }
         self.records = seen;
+        let reported = self
+            .records
+            .values()
+            .map(|(_, r)| r)
+            .filter_map(|r| {
+                Some((
+                    r.received_at,
+                    r.rate_limits.as_ref()?.seven_day.as_ref()?.resets_at?,
+                ))
+            })
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, reset)| reset);
+        if let Some(reset) = reported
+            && self.weekly_reset != Some(reset)
+        {
+            self.save_weekly_reset(reset);
+        }
     }
 
     /// The context window Claude Code reported for a session.
@@ -246,69 +356,98 @@ impl ClaudeBridge {
         let desktop = self
             .desktop
             .as_ref()
-            .and_then(|(_, s)| s.clone())
-            .filter(|s| s.u.fh.is_some() || s.u.sd.is_some());
+            .and_then(|(_, r)| r.clone())
+            .filter(|r| r.newest.u.fh.is_some() || r.newest.u.sd.is_some());
         let now = unix_secs(now);
         let observed = match (&status_line, &desktop) {
             (None, None) => return ProviderUsage::unknown(PROVIDER, NAME, WAITING_HINT),
             (Some((at, _)), None) => *at,
-            (None, Some(d)) => d.t / 1000,
-            (Some((at, _)), Some(d)) => (*at).max(d.t / 1000),
+            (None, Some(d)) => d.newest.t / 1000,
+            (Some((at, _)), Some(d)) => (*at).max(d.newest.t / 1000),
         };
-        let pick = |from_line: Option<&Window>, from_desktop: Option<f64>| {
-            pick_window(
-                status_line.as_ref().map(|(at, _)| *at),
-                from_line,
-                desktop.as_ref().map(|d| d.t / 1000),
-                from_desktop,
-                now,
-            )
-        };
+        let line_at = status_line.as_ref().map(|(at, _)| *at);
+        let desktop_at = desktop.as_ref().map(|d| d.newest.t / 1000);
         let limits = status_line.as_ref().map(|(_, l)| l);
-        // With a weekly reading but no 5-hour one, no 5-hour window is running.
-        let desktop_session = desktop
-            .as_ref()
-            .and_then(|d| d.u.fh.or(d.u.sd.map(|_| 0.0)));
-        ProviderUsage::from_reading(
+        let mut estimated = false;
+        let mut pick = |from_line: Option<&Window>,
+                        from_desktop: Option<(f64, Option<i64>, bool)>| {
+            let (window, guessed) = pick_window(line_at, from_line, desktop_at, from_desktop, now);
+            estimated |= guessed;
+            window
+        };
+        let usage = desktop.as_ref().map(|d| &d.newest.u);
+        // The app sometimes leaves the 5-hour figure out, so then there's no row for it.
+        let desktop_session = usage.and_then(|u| u.fh).map(|used| {
+            (
+                used,
+                desktop.as_ref().and_then(|d| d.session_reset(now)),
+                true,
+            )
+        });
+        // A weekly reset Claude reported is exact for every week after it too.
+        let known_weekly = self.weekly_reset.map(|r| next_weekly_reset(r, now));
+        let desktop_weekly = usage.and_then(|u| u.sd).map(|used| match known_weekly {
+            Some(reset) => (used, Some(reset), false),
+            None => (
+                used,
+                desktop.as_ref().and_then(|d| d.weekly_reset(now)),
+                true,
+            ),
+        });
+        let limits = vec![
+            Limit::session(pick(
+                limits.and_then(|l| l.five_hour.as_ref()),
+                desktop_session,
+            )),
+            Limit::weekly(pick(
+                limits.and_then(|l| l.seven_day.as_ref()),
+                desktop_weekly,
+            )),
+        ];
+        let mut usage = ProviderUsage::from_reading(
             PROVIDER,
             NAME,
-            vec![
-                Limit::session(pick(
-                    limits.and_then(|l| l.five_hour.as_ref()),
-                    desktop_session,
-                )),
-                Limit::weekly(pick(
-                    limits.and_then(|l| l.seven_day.as_ref()),
-                    desktop.as_ref().and_then(|d| d.u.sd),
-                )),
-            ],
+            limits,
             None,
             rfc3339(observed),
             "Claude reported no plan limits.",
-        )
+        );
+        if estimated && usage.note.is_none() {
+            usage.note = Some(ESTIMATED_RESET_NOTE.into());
+        }
+        usage
     }
 }
 
-/// One window from the newer of the two readings. The desktop app's has no reset time,
-/// so it borrows the status line's while that one is still ahead.
+/// One window from the newer of the two readings, and whether its reset time is an
+/// estimate. The desktop app's has no reset time, so it borrows the status line's while
+/// that one is still ahead, or else uses the one worked out from its history.
 fn pick_window(
     line_at: Option<i64>,
     line: Option<&Window>,
     desktop_at: Option<i64>,
-    desktop: Option<f64>,
+    desktop: Option<(f64, Option<i64>, bool)>,
     now: i64,
-) -> LimitWindow {
+) -> (LimitWindow, bool) {
     let from_line = |w: &Window| LimitWindow::from_reading(w.used_percentage, w.resets_at, now);
+    // `guessed` says whether the desktop reading's own reset time is an estimate.
+    let from_desktop =
+        |used: f64, exact: Option<i64>, reset: Option<i64>, guessed: bool| match exact {
+            Some(exact) => (LimitWindow::from_reading(used, Some(exact), now), false),
+            None => (
+                LimitWindow::from_reading(used, reset, now),
+                guessed && reset.is_some(),
+            ),
+        };
     match (line, desktop) {
-        (None, None) => LimitWindow::NotReported,
-        (Some(w), None) => from_line(w),
-        (None, Some(used)) => LimitWindow::from_reading(used, None, now),
-        (Some(w), Some(used)) => {
+        (None, None) => (LimitWindow::NotReported, false),
+        (Some(w), None) => (from_line(w), false),
+        (None, Some((used, reset, guessed))) => from_desktop(used, None, reset, guessed),
+        (Some(w), Some((used, reset, guessed))) => {
             if line_at >= desktop_at {
-                from_line(w)
+                (from_line(w), false)
             } else {
-                let reset = w.resets_at.filter(|&r| r > now);
-                LimitWindow::from_reading(used, reset, now)
+                from_desktop(used, w.resets_at.filter(|&r| r > now), reset, guessed)
             }
         }
     }
@@ -480,7 +619,7 @@ mod tests {
         let home = temp("save-home");
         let now = epoch(1_900_000_000);
         save(&dir, INPUT.as_bytes(), now);
-        let mut bridge = ClaudeBridge::new(dir.clone(), &home);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &home, None);
         bridge.refresh(now);
         assert_eq!(bridge.context_window("abc-123"), Some(1_000_000));
         let usage = bridge.usage(now);
@@ -543,7 +682,7 @@ mod tests {
                {"t":1899999900000,"org":"o","u":{"sd":21}}"#,
         );
         let now = epoch(1_900_000_000);
-        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop, None);
         bridge.refresh(now);
         let usage = bridge.usage(now);
         assert_eq!(usage.status, UsageStatus::Available);
@@ -554,14 +693,71 @@ mod tests {
                 resets_at: None
             })
         );
-        // No 5-hour figure next to a weekly one means no 5-hour window is running.
+        // The newest sample left the 5-hour figure out.
+        assert_eq!(usage.limit("session"), None);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&desktop);
+    }
+
+    #[test]
+    fn works_out_reset_times_from_the_desktop_apps_history() {
+        let dir = temp("estimate");
+        let desktop = temp("estimate-app");
+        // The week reset in the hour starting 1_899_500_400, first seen at 1_899_500_900;
+        // a 5-hour window started in the hour starting 1_899_990_000.
+        desktop_history(
+            &desktop,
+            r#"{"t":1899500000000,"u":{"fh":10,"sd":80}},
+               {"t":1899500900000,"u":{"sd":0}},
+               {"t":1899990000000,"u":{"sd":3}},
+               {"t":1899990900000,"u":{"fh":4,"sd":4}},
+               {"t":1899999900000,"u":{"fh":9,"sd":6}}"#,
+        );
+        let now = epoch(1_900_000_000);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop, None);
+        bridge.refresh(now);
+        let usage = bridge.usage(now);
+        assert_eq!(
+            usage.limit("weekly"),
+            Some(&LimitWindow::Reported {
+                used_percent: 6.0,
+                resets_at: Some(1_899_500_400 + WEEK_SECS)
+            })
+        );
         assert_eq!(
             usage.limit("session"),
             Some(&LimitWindow::Reported {
-                used_percent: 0.0,
-                resets_at: None
+                used_percent: 9.0,
+                resets_at: Some(1_899_990_000 + SESSION_SECS)
             })
         );
+        assert_eq!(usage.note.as_deref(), Some(ESTIMATED_RESET_NOTE));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&desktop);
+    }
+
+    #[test]
+    fn an_exact_weekly_reset_counts_on_week_by_week() {
+        let dir = temp("anchor");
+        let desktop = temp("anchor-app");
+        desktop_history(&desktop, r#"{"t":1899999900000,"u":{"sd":6}}"#);
+        let now = epoch(1_900_000_000);
+        // Reported three weeks ago and saved, as from ACM's usage history.
+        let known = 1_900_100_000 - 3 * WEEK_SECS;
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop, Some(known));
+        bridge.refresh(now);
+        let usage = bridge.usage(now);
+        assert_eq!(
+            usage.limit("weekly"),
+            Some(&LimitWindow::Reported {
+                used_percent: 6.0,
+                resets_at: Some(1_900_100_000)
+            })
+        );
+        assert_eq!(usage.note, None);
+        // Saved, so the next start doesn't need the history.
+        let again = ClaudeBridge::new(dir.clone(), &desktop, None);
+        assert_eq!(again.weekly_reset, Some(known));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&desktop);
     }
@@ -574,7 +770,7 @@ mod tests {
         save(&dir, INPUT.as_bytes(), epoch(1_899_999_000));
         desktop_history(&desktop, r#"{"t":1899999500000,"u":{"fh":30,"sd":45}}"#);
         let now = epoch(1_900_000_000);
-        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop);
+        let mut bridge = ClaudeBridge::new(dir.clone(), &desktop, None);
         bridge.refresh(now);
         let usage = bridge.usage(now);
         assert_eq!(

@@ -15,7 +15,7 @@ use crate::codex::CodexSource;
 use crate::codex_live::CodexLive;
 use crate::copilot::CopilotSource;
 use crate::cursor::CursorSource;
-use crate::history::Recorder;
+use crate::history::{self, Recorder};
 use crate::model::{ProviderInfo, ProviderUsage, Snapshot, UsageStatus};
 use crate::opencode::OpenCodeChats;
 use crate::settings::Settings;
@@ -90,7 +90,8 @@ pub fn start(app: AppHandle) {
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
         claude_bridge::connect(&claude_home, &bridge_dir);
-        let mut claude = ClaudeBridge::new(bridge_dir, &claude_desktop);
+        let recorded_reset = history::last_reset(&history_path, "claude");
+        let mut claude = ClaudeBridge::new(bridge_dir, &claude_desktop, recorded_reset);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
