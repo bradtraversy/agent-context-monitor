@@ -88,7 +88,7 @@ let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
-// Why the last Turn on click failed, by provider.
+// Why the last Connect click failed, by provider.
 const actionErrors = new Map<string, string>();
 
 // The same thresholds as the tray and alerts, which the app sends with each snapshot.
@@ -172,7 +172,7 @@ function usageCard(u: ProviderUsage): string {
   const error = actionErrors.get(u.provider);
   const action =
     u.action === "turn_on"
-      ? `<button class="action" data-turn-on="${escape(u.provider)}">Turn on</button>` +
+      ? `<button class="action" data-turn-on="${escape(u.provider)}">Connect</button>` +
         (error ? `<p class="note">${escape(error)}</p>` : "")
       : "";
   return `<article class="card" data-stale="${u.stale}">

@@ -9,7 +9,7 @@ use tauri_plugin_notification::NotificationExt;
 
 use crate::alerts::Alerts;
 
-use crate::claude_bridge::ClaudeBridge;
+use crate::claude_bridge::{self, ClaudeBridge};
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
 use crate::codex_live::CodexLive;
@@ -98,6 +98,7 @@ pub fn start(app: AppHandle) {
         let mut opencode = OpenCodeChats::new(home);
         let mut alerts = Alerts::load(data_dir.join("alerts-sent.json"));
         let mut codex = CodexSource::new(codex_home);
+        claude_bridge::keep_connected_here(&claude_home, &bridge_dir);
         let mut claude = ClaudeBridge::new(bridge_dir, &claude_home);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());

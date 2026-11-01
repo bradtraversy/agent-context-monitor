@@ -32,7 +32,7 @@ const PASS_ARG: &str = "--pass";
 /// The status line that was there before, kept so it can be put back by hand.
 const PREVIOUS_FILE: &str = "previous-statusline.json";
 const TURN_ON_HINT: &str =
-    "Turn on Claude usage to have Claude Code share it with ACM. Your status line stays as it is.";
+    "Connect to let Claude Code share your usage with ACM. Your status line stays the same.";
 const WAITING_HINT: &str = "Claude usage appears after your next reply in Claude Code.";
 /// Sessions not heard from in this long are forgotten.
 const KEEP_SESSIONS: Duration = Duration::from_secs(8 * 24 * 60 * 60);
@@ -237,7 +237,8 @@ impl ClaudeBridge {
             "Claude reported no plan limits.",
         );
         if !self.turned_on {
-            usage.note = Some("Claude usage is turned off, so this is the last reading.".into());
+            usage.note =
+                Some("Claude Code isn't connected anymore, so this is the last reading.".into());
             usage.action = Some(UsageAction::TurnOn);
         }
         usage
@@ -295,18 +296,52 @@ fn quote(s: &str) -> String {
     format!("\"{s}\"")
 }
 
-/// Points Claude Code's status line at ACM, keeping any status line already set up.
-pub fn turn_on(claude_home: &Path, dir: &Path) -> Result<(), String> {
-    // An AppImage runs from a new temporary folder each time, so it's named by its own path.
-    let exe = std::env::var_os("APPIMAGE")
+/// This copy of ACM's program file. An AppImage runs from a new temporary folder each
+/// time, so it's named by its own path.
+fn own_exe() -> Result<PathBuf, String> {
+    std::env::var_os("APPIMAGE")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::current_exe().ok())
-        .ok_or("Couldn't find ACM's own program file.")?;
+        .ok_or_else(|| "Couldn't find ACM's own program file.".into())
+}
+
+/// When Claude Code is already connected, points it at this copy of ACM, so moving or
+/// reinstalling the app doesn't leave the status line running an old program file.
+pub fn keep_connected_here(claude_home: &Path, dir: &Path) {
+    let settings_path = claude_home.join("settings.json");
+    let Ok(mut settings) = read_settings(&settings_path) else {
+        return;
+    };
+    let Some(current) = status_command(&settings).filter(|c| is_ours(c)) else {
+        return;
+    };
+    let Ok(exe) = own_exe() else { return };
+    let previous = fs::read(dir.join(PREVIOUS_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let previous_command = previous
+        .as_ref()
+        .and_then(|p| p.get("command"))
+        .and_then(Value::as_str);
+    let wanted = bridge_command(&exe, dir, previous_command);
+    if current == wanted {
+        return;
+    }
+    if let Some(Value::Object(status_line)) = settings.get_mut("statusLine") {
+        status_line.insert("command".into(), wanted.into());
+        let _ = write_settings(&settings_path, &settings);
+    }
+}
+
+/// Points Claude Code's status line at ACM, keeping any status line already set up.
+pub fn turn_on(claude_home: &Path, dir: &Path) -> Result<(), String> {
+    let exe = own_exe()?;
     let settings_path = claude_home.join("settings.json");
     let mut settings = read_settings(&settings_path)?;
     let previous = settings.get("statusLine").cloned();
     if status_command(&settings).is_some_and(is_ours) {
+        keep_connected_here(claude_home, dir);
         return Ok(());
     }
     let previous_command = status_command(&settings).map(str::to_string);
@@ -451,6 +486,26 @@ mod tests {
         let saved: Value =
             serde_json::from_slice(&fs::read(dir.join(PREVIOUS_FILE)).unwrap()).unwrap();
         assert_eq!(saved["command"], "~/bin/mine.sh");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_moved_app_points_claude_code_at_its_new_place() {
+        let dir = temp("moved");
+        let home = temp("moved-home");
+        let path = home.join("settings.json");
+        let old = bridge_command(Path::new("/old/place/acm"), &dir, None);
+        fs::write(
+            &path,
+            serde_json::json!({"statusLine": {"type": "command", "command": old}}).to_string(),
+        )
+        .unwrap();
+        keep_connected_here(&home, &dir);
+        let settings = read_settings(&path).unwrap();
+        let command = status_command(&settings).unwrap();
+        assert!(is_ours(command));
+        assert!(!command.contains("/old/place"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&home);
     }
