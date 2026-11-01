@@ -32,14 +32,14 @@ fn get_snapshot(state: tauri::State<SharedSnapshot>) -> Snapshot {
     state.0.lock().unwrap().clone()
 }
 
-// Off the window's thread: it reads or writes files.
+// Off the window's thread, since it saves the settings file.
 #[tauri::command(async)]
 fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
 }
 
-/// Starts signing in to a provider whose usage card asked for it.
-// Off the window's thread: it reads or writes files.
+/// Starts signing in to a provider whose usage card asked for it. Off the window's
+/// thread, since it looks for the agent and opens a terminal.
 #[tauri::command(async)]
 fn sign_in(provider: String) -> Result<(), String> {
     match provider.as_str() {
@@ -48,7 +48,7 @@ fn sign_in(provider: String) -> Result<(), String> {
     }
 }
 
-// Off the window's thread: it reads or writes files.
+// Off the window's thread, since it reads the whole history file.
 #[tauri::command(async)]
 fn get_history(
     snapshot: tauri::State<SharedSnapshot>,
