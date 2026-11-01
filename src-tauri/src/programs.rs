@@ -67,6 +67,10 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Printed around the PATH so it can be told apart from what a shell profile prints.
+#[cfg(unix)]
+const MARK: &str = "__ACM_PATH__";
+
 /// The PATH the user's own terminal gets, asked of their login shell once per run. An
 /// app opened from the Dock or a launcher gets a much shorter one.
 fn login_shell_path() -> Option<&'static OsString> {
@@ -76,11 +80,17 @@ fn login_shell_path() -> Option<&'static OsString> {
 
 #[cfg(unix)]
 fn read_login_shell_path() -> Option<OsString> {
-    use std::io::Read;
-    const MARK: &str = "__ACM_PATH__";
     // A slow or stuck shell profile must not hold up the app for long.
     const WAIT: Duration = Duration::from_secs(5);
     let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty())?;
+    shell_path(&shell, WAIT)
+}
+
+/// Asks `shell` for its login PATH, giving up after `wait`.
+#[cfg(unix)]
+fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
+    use std::io::Read;
+    use std::sync::mpsc;
     let mut child = Command::new(shell)
         .args([
             "-l",
@@ -93,21 +103,35 @@ fn read_login_shell_path() -> Option<OsString> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+    // Read as the output arrives instead of after the shell exits: something the profile
+    // starts in the background can keep the output open long after, and waiting for it
+    // to close would never finish.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
             }
         }
-    }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    marked_path(&out, MARK).map(OsString::from)
+    });
+    let deadline = Instant::now() + wait;
+    let mut out = Vec::new();
+    let path = loop {
+        if let Some(path) = marked_path(&String::from_utf8_lossy(&out), MARK) {
+            break Some(OsString::from(path));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(chunk) => out.extend(chunk),
+            // Timed out, or the output closed without the PATH in it.
+            Err(_) => break None,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    path
 }
 
 #[cfg(not(unix))]
@@ -251,6 +275,27 @@ mod tests {
         assert_eq!(marked_path(out, "__M__"), Some("/a/bin:/usr/bin"));
         assert_eq!(marked_path("no marks", "__M__"), None);
         assert_eq!(marked_path("__M____M__", "__M__"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_left_running_in_the_background_does_not_hold_up_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("acm-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stands in for a shell whose profile starts something that keeps the output open.
+        let shell = dir.join("shell");
+        std::fs::write(
+            &shell,
+            format!("#!/bin/sh\nsleep 30 &\nprintf '{MARK}/x/bin{MARK}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let path = shell_path(shell.as_os_str(), Duration::from_secs(10));
+        assert_eq!(path, Some(OsString::from("/x/bin")));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
