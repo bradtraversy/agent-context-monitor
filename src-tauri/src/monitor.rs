@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,7 +12,7 @@ use crate::alerts::Alerts;
 use crate::claude::ClaudeSource;
 use crate::claude_sessions::ClaudeSessions;
 use crate::codex::CodexSource;
-use crate::codex_live;
+use crate::codex_live::CodexLive;
 use crate::copilot::CopilotSource;
 use crate::cursor::CursorSource;
 use crate::history::Recorder;
@@ -21,11 +21,10 @@ use crate::model::{
 };
 use crate::opencode::OpenCodeChats;
 use crate::settings::Settings;
-use crate::sources;
+use crate::sources::{self, FirstChecks, Latest, UsageSource};
 use crate::tray;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const LIVE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the Claude check looks for a reason to ask Claude for fresh usage.
 const CLAUDE_TICK: Duration = Duration::from_secs(1);
 /// While a Claude chat is being used, usage is checked this often so the numbers keep up.
@@ -69,14 +68,15 @@ pub fn start(app: AppHandle) {
     // Live usage checks are slow, so they run apart from the file loop and only when
     // the newest reading is about to go stale.
     let started = Instant::now();
-    let first_checks_done = Arc::new(AtomicUsize::new(0));
+    let first_checks = Arc::new(FirstChecks::default());
     let claude = Arc::new(Mutex::new(ClaudeSource::new(claude_home.clone())));
     let check_now = Arc::clone(&app.state::<CheckNow>().0);
     // Unix seconds of the last write to any Claude chat, so usage follows Claude in use.
     let newest_claude_chat = Arc::new(AtomicI64::new(i64::MIN));
+    first_checks.expect();
     {
         let claude = Arc::clone(&claude);
-        let first_checks_done = Arc::clone(&first_checks_done);
+        let first_checks = Arc::clone(&first_checks);
         let newest_claude_chat = Arc::clone(&newest_claude_chat);
         thread::spawn(move || {
             let mut source = claude.lock().unwrap().clone();
@@ -102,64 +102,36 @@ pub fn start(app: AppHandle) {
                     source.refresh(now);
                     *claude.lock().unwrap() = source.clone();
                 }
-                mark_first_check(&mut first, &first_checks_done);
+                if std::mem::take(&mut first) {
+                    first_checks.done();
+                }
                 thread::sleep(CLAUDE_TICK);
             }
         });
     }
 
-    let codex_live = Arc::new(Mutex::new(None));
-    // Why the last live check failed, shown when the reading from session files is stale.
-    let codex_problem: Arc<Mutex<Option<&'static str>>> = Arc::default();
+    let opened = Arc::clone(&app.state::<CheckNow>().0);
     let newest_codex_file = Arc::new(AtomicI64::new(i64::MIN));
-    {
-        let codex_live = Arc::clone(&codex_live);
-        let codex_problem = Arc::clone(&codex_problem);
-        let newest_codex_file = Arc::clone(&newest_codex_file);
-        let first_checks_done = Arc::clone(&first_checks_done);
-        thread::spawn(move || {
-            let mut last_check = i64::MIN;
-            let mut first = true;
-            loop {
-                let now = SystemTime::now();
-                // Codex writes fresh readings to its session files while in use, so
-                // starting Codex to ask is only needed when it has been quiet.
-                let newest = last_check.max(newest_codex_file.load(Ordering::Relaxed));
-                if unix_secs(now).saturating_sub(newest) >= LIVE_REFRESH_AFTER_SECS {
-                    last_check = unix_secs(now);
-                    match codex_live::fetch(now) {
-                        Ok(reading) => {
-                            *codex_live.lock().unwrap() = Some(reading);
-                            *codex_problem.lock().unwrap() = None;
-                        }
-                        Err(problem) => *codex_problem.lock().unwrap() = Some(problem),
-                    }
-                }
-                mark_first_check(&mut first, &first_checks_done);
-                thread::sleep(LIVE_CHECK_INTERVAL);
-            }
-        });
-    }
+    let codex_live = sources::spawn(
+        CodexLive {
+            newest_file_reading: Arc::clone(&newest_codex_file),
+        },
+        Arc::clone(&opened),
+        Arc::clone(&first_checks),
+    );
 
     let config_dir = app
         .path()
         .config_dir()
         .unwrap_or_else(|_| home.join(".config"));
-    let opened = Arc::clone(&app.state::<CheckNow>().0);
     let live_sources = [
-        sources::spawn(
-            CopilotSource::new(home.clone()),
-            Arc::clone(&opened),
-            Arc::clone(&first_checks_done),
-        ),
-        sources::spawn(
+        spawn_usage(CopilotSource::new(home.clone()), &opened, &first_checks),
+        spawn_usage(
             CursorSource::new(home.clone(), config_dir),
-            Arc::clone(&opened),
-            Arc::clone(&first_checks_done),
+            &opened,
+            &first_checks,
         ),
     ];
-    // Claude and Codex have their own checks above.
-    let live_source_count = live_sources.len() + 2;
 
     thread::spawn(move || {
         let mut opencode = OpenCodeChats::new(home);
@@ -168,9 +140,7 @@ pub fn start(app: AppHandle) {
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
-            if first_checks_done.load(Ordering::Relaxed) < live_source_count
-                && started.elapsed() < FIRST_CHECK_WAIT
-            {
+            if !first_checks.all_done() && started.elapsed() < FIRST_CHECK_WAIT {
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -179,21 +149,21 @@ pub fn start(app: AppHandle) {
             if let Some(newest) = codex.newest_file_reading() {
                 newest_codex_file.store(newest, Ordering::Relaxed);
             }
-            let live = codex_live.lock().unwrap().clone();
+            let live = codex_live.lock().unwrap().clone().unwrap_or_default();
             let mut usage = vec![
                 claude.lock().unwrap().usage(now).with_staleness(now),
                 with_problem(
-                    codex.usage(now, live.as_ref()).with_staleness(now),
-                    *codex_problem.lock().unwrap(),
+                    codex
+                        .usage(now, live.last_good.as_ref())
+                        .with_staleness(now),
+                    live.problem.as_deref(),
                 ),
             ];
             // Readings age between checks, so staleness is worked out again each time.
-            usage.extend(
-                live_sources
-                    .iter()
-                    .filter_map(|l| l.lock().unwrap().clone())
-                    .map(|u| u.with_staleness(now)),
-            );
+            usage.extend(live_sources.iter().filter_map(|(info, latest)| {
+                let readings = latest.lock().unwrap().clone()?;
+                Some(readings.usage(info).with_staleness(now))
+            }));
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
@@ -235,6 +205,17 @@ pub fn start(app: AppHandle) {
     });
 }
 
+/// Starts the live check of an agent that only reports usage, kept with its name.
+fn spawn_usage<S: UsageSource<Reading = ProviderUsage>>(
+    source: S,
+    opened: &Arc<AtomicU64>,
+    first_checks: &Arc<FirstChecks>,
+) -> (ProviderInfo, Latest<ProviderUsage>) {
+    let info = source.info();
+    let latest = sources::spawn(source, Arc::clone(opened), Arc::clone(first_checks));
+    (info, latest)
+}
+
 #[derive(Clone, Copy, Default)]
 struct CheckReason {
     /// The window was just opened.
@@ -256,13 +237,6 @@ fn claude_check_due(now: i64, last_check: i64, reason: CheckReason, backing_off:
     }
     (reason.opened && age >= CLAUDE_OPEN_GAP_SECS)
         || (reason.chat_active && age >= CLAUDE_ACTIVE_GAP_SECS)
-}
-
-/// Counts a live source's first check, done or failed, so the window can stop waiting on it.
-fn mark_first_check(first: &mut bool, done: &AtomicUsize) {
-    if std::mem::take(first) {
-        done.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 /// Says why a live check failed on a card whose reading is out of date or missing.

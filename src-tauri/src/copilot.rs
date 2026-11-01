@@ -77,6 +77,8 @@ impl CopilotSource {
 }
 
 impl UsageSource for CopilotSource {
+    type Reading = ProviderUsage;
+
     fn info(&self) -> ProviderInfo {
         INFO
     }

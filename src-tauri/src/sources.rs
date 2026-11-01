@@ -1,5 +1,6 @@
-//! Agents whose usage is asked for over the network. Each one is a `UsageSource`, checked
-//! on its own thread so a slow reply never holds up the others.
+//! Agents whose usage is asked for live, over the network or from the agent itself. Each
+//! one is a `UsageSource`, checked on its own thread so a slow reply never holds up the
+//! others.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,24 +28,44 @@ pub enum Failure {
 }
 
 pub trait UsageSource: Send + 'static {
+    /// What a check returns: usage ready to show, or a raw reading the caller combines
+    /// with what it reads from files.
+    type Reading: Clone + Send + 'static;
     fn info(&self) -> ProviderInfo;
     /// Whether the agent looks installed, so its card is worth showing.
     fn installed(&self) -> bool;
-    fn fetch(&mut self, now: SystemTime) -> Result<ProviderUsage, Failure>;
+    fn fetch(&mut self, now: SystemTime) -> Result<Self::Reading, Failure>;
+    /// Whether opening the window checks early. Off for an agent that is slow to ask.
+    fn check_when_opened(&self) -> bool {
+        true
+    }
+    /// Whether the regular check can wait, because fresh numbers are arriving another way.
+    fn fresh_elsewhere(&self, _now: i64) -> bool {
+        false
+    }
 }
 
-/// The latest usage from a source, or `None` while the agent isn't installed.
-pub type Latest = Arc<Mutex<Option<ProviderUsage>>>;
+/// The latest from a source, or `None` while the agent isn't installed.
+pub type Latest<R> = Arc<Mutex<Option<Readings<R>>>>;
 
 /// Keeps the last good reading up after a failed check, with the problem beside it.
-#[derive(Default)]
-struct Readings {
-    last_good: Option<ProviderUsage>,
-    problem: Option<String>,
+#[derive(Clone, Debug)]
+pub struct Readings<R> {
+    pub last_good: Option<R>,
+    pub problem: Option<String>,
 }
 
-impl Readings {
-    fn apply(&mut self, result: Result<ProviderUsage, Failure>) {
+impl<R> Default for Readings<R> {
+    fn default() -> Self {
+        Readings {
+            last_good: None,
+            problem: None,
+        }
+    }
+}
+
+impl<R> Readings<R> {
+    fn apply(&mut self, result: Result<R, Failure>) {
         match result {
             Ok(usage) => {
                 self.last_good = Some(usage);
@@ -59,8 +80,10 @@ impl Readings {
             Err(Failure::TooManyChecks) => {}
         }
     }
+}
 
-    fn usage(&self, info: &ProviderInfo) -> ProviderUsage {
+impl Readings<ProviderUsage> {
+    pub fn usage(&self, info: &ProviderInfo) -> ProviderUsage {
         match &self.last_good {
             Some(usage) => {
                 let mut usage = usage.clone();
@@ -78,24 +101,56 @@ impl Readings {
     }
 }
 
-/// Whether to check now. The regular check keeps readings under the freshness limit, and
-/// opening the window checks sooner unless the provider asked for fewer checks.
-fn check_due(now: i64, last_check: i64, opened: bool, backing_off: bool) -> bool {
+/// Whether to check now. The regular check keeps readings under the freshness limit
+/// unless they are fresh from elsewhere, and opening the window checks sooner unless the
+/// provider asked for fewer checks.
+fn check_due(
+    now: i64,
+    last_check: i64,
+    opened: bool,
+    backing_off: bool,
+    fresh_elsewhere: bool,
+) -> bool {
     let age = now.saturating_sub(last_check);
-    age >= LIVE_REFRESH_AFTER_SECS || (opened && !backing_off && age >= OPEN_GAP_SECS)
+    (age >= LIVE_REFRESH_AFTER_SECS && !fresh_elsewhere)
+        || (opened && !backing_off && age >= OPEN_GAP_SECS)
 }
 
-/// Checks `source` on its own thread. `opened` counts window openings, and `first_done`
-/// is bumped once the first check is done, or right away if the agent isn't installed.
-pub fn spawn(
-    mut source: impl UsageSource,
+/// Counts the live checks the window waits for when it first opens, so it opens on fresh
+/// numbers instead of old ones from files.
+#[derive(Default)]
+pub struct FirstChecks {
+    expected: AtomicUsize,
+    done: AtomicUsize,
+}
+
+impl FirstChecks {
+    /// Adds a check to wait for. Call before starting it, so none is missed.
+    pub fn expect(&self) {
+        self.expected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Marks one check's first attempt done, whether or not it got a reading.
+    pub fn done(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn all_done(&self) -> bool {
+        self.done.load(Ordering::Relaxed) >= self.expected.load(Ordering::Relaxed)
+    }
+}
+
+/// Checks `source` on its own thread. `opened` counts window openings, and `first_checks`
+/// hears once the first check is done, or right away if the agent isn't installed.
+pub fn spawn<S: UsageSource>(
+    mut source: S,
     opened: Arc<AtomicU64>,
-    first_done: Arc<AtomicUsize>,
-) -> Latest {
-    let latest: Latest = Arc::default();
+    first_checks: Arc<FirstChecks>,
+) -> Latest<S::Reading> {
+    let latest: Latest<S::Reading> = Arc::default();
     let shared = Arc::clone(&latest);
+    first_checks.expect();
     thread::spawn(move || {
-        let info = source.info();
         let mut readings = Readings::default();
         let mut installed = false;
         let mut last_install_check = i64::MIN;
@@ -115,19 +170,26 @@ pub fn spawn(
                 }
             }
             let open_count = opened.load(Ordering::Relaxed);
-            let was_opened = open_count != seen_open;
+            let was_opened = open_count != seen_open && source.check_when_opened();
             seen_open = open_count;
-            if installed && check_due(secs, last_check, was_opened, secs < backoff_until) {
+            let due = check_due(
+                secs,
+                last_check,
+                was_opened,
+                secs < backoff_until,
+                source.fresh_elsewhere(secs),
+            );
+            if installed && due {
                 last_check = secs;
                 let result = source.fetch(now);
-                if result == Err(Failure::TooManyChecks) {
+                if matches!(result, Err(Failure::TooManyChecks)) {
                     backoff_until = secs + BACKOFF_SECS;
                 }
                 readings.apply(result);
-                *shared.lock().unwrap() = Some(readings.usage(&info));
+                *shared.lock().unwrap() = Some(readings.clone());
             }
             if std::mem::take(&mut first) {
-                first_done.fetch_add(1, Ordering::Relaxed);
+                first_checks.done();
             }
             thread::sleep(TICK);
         }
@@ -156,22 +218,37 @@ mod tests {
 
     #[test]
     fn checks_regularly_and_when_opened_unless_backing_off() {
-        assert!(check_due(1000, i64::MIN, false, false));
+        let due = |now, opened, backing_off| check_due(now, 1000, opened, backing_off, false);
+        assert!(check_due(1000, i64::MIN, false, false, false));
+        assert!(!due(1000 + LIVE_REFRESH_AFTER_SECS - 1, false, false));
+        assert!(due(1000 + LIVE_REFRESH_AFTER_SECS, false, false));
+        assert!(!due(1003, true, false));
+        assert!(due(1000 + OPEN_GAP_SECS, true, false));
+        assert!(!due(1100, true, true));
+    }
+
+    #[test]
+    fn fresh_numbers_from_elsewhere_hold_off_the_regular_check() {
         assert!(!check_due(
-            1000 + LIVE_REFRESH_AFTER_SECS - 1,
-            1000,
-            false,
-            false
-        ));
-        assert!(check_due(
             1000 + LIVE_REFRESH_AFTER_SECS,
             1000,
             false,
-            false
+            false,
+            true
         ));
-        assert!(!check_due(1003, 1000, true, false));
-        assert!(check_due(1000 + OPEN_GAP_SECS, 1000, true, false));
-        assert!(!check_due(1100, 1000, true, true));
+        assert!(check_due(1000 + OPEN_GAP_SECS, 1000, true, false, true));
+    }
+
+    #[test]
+    fn first_checks_are_done_once_each_has_reported() {
+        let checks = FirstChecks::default();
+        assert!(checks.all_done());
+        checks.expect();
+        checks.expect();
+        checks.done();
+        assert!(!checks.all_done());
+        checks.done();
+        assert!(checks.all_done());
     }
 
     #[test]

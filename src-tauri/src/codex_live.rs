@@ -7,14 +7,17 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
 use crate::codex::{RateReading, RateWindow};
+use crate::model::{LIVE_REFRESH_AFTER_SECS, ProviderInfo};
 use crate::programs;
+use crate::sources::{Failure, UsageSource};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_ID: u64 = 1;
@@ -50,8 +53,47 @@ struct Window {
     resets_at: Option<i64>,
 }
 
+/// Codex's live check. Codex writes fresh readings to its session files while in use, so
+/// starting Codex to ask is only needed once those have gone quiet.
+pub struct CodexLive {
+    /// Unix seconds of the newest reading in Codex's session files.
+    pub newest_file_reading: Arc<AtomicI64>,
+}
+
+impl UsageSource for CodexLive {
+    type Reading = RateReading;
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "codex",
+            name: "Codex",
+            chats: true,
+        }
+    }
+
+    /// The Codex card shows readings from session files either way, and a failed check
+    /// says why when those are out of date.
+    fn installed(&self) -> bool {
+        true
+    }
+
+    fn fetch(&mut self, now: SystemTime) -> Result<RateReading, Failure> {
+        fetch(now).map_err(|problem| Failure::Request(problem.into()))
+    }
+
+    /// Starting Codex takes a few seconds, too slow for every opening of the window.
+    fn check_when_opened(&self) -> bool {
+        false
+    }
+
+    fn fresh_elsewhere(&self, now: i64) -> bool {
+        let newest = self.newest_file_reading.load(Ordering::Relaxed);
+        now.saturating_sub(newest) < LIVE_REFRESH_AFTER_SECS
+    }
+}
+
 /// A fresh reading, or why there isn't one, said for the usage card.
-pub fn fetch(now: SystemTime) -> Result<RateReading, &'static str> {
+fn fetch(now: SystemTime) -> Result<RateReading, &'static str> {
     let bin = find_codex().ok_or("Couldn't find Codex to ask it for fresh usage.")?;
     let mut command = Command::new(&bin);
     command

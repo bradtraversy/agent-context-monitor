@@ -115,6 +115,8 @@ fn session_cookie(token: &str, sub: &str) -> Option<String> {
 }
 
 impl UsageSource for CursorSource {
+    type Reading = ProviderUsage;
+
     fn info(&self) -> ProviderInfo {
         INFO
     }
