@@ -1,6 +1,6 @@
 [package]
 name = "agent-context-monitor"
-version = "0.1.6"
+version = "0.1.7"
 description = "Tray app showing AI coding agent usage and context left"
 authors = ["Brad Traversy"]
 license = "MIT"
