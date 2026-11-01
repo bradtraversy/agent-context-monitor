@@ -17,7 +17,7 @@ interface ProviderUsage {
   observed_at: string | null;
   limits: { id: string; label: string; short: string; window: LimitWindow }[];
   stale: boolean;
-  action: "sign_in" | null;
+  action: "turn_on" | null;
 }
 
 interface ContextMeasure {
@@ -88,8 +88,8 @@ let showAllChats = false;
 const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 
 let snapshot: Snapshot | null = null;
-// Why the last Sign in click couldn't open a terminal, by provider.
-const signInErrors = new Map<string, string>();
+// Why the last Turn on click failed, by provider.
+const actionErrors = new Map<string, string>();
 
 // The same thresholds as the tray and alerts, which the app sends with each snapshot.
 function levelFor(used: number): Level {
@@ -169,10 +169,10 @@ function usageCard(u: ProviderUsage): string {
       ? u.limits.map((l) => limitRow(l.label, l.window)).join("")
       : "";
   const note = u.note ? `<p class="note">${escape(u.note)}</p>` : "";
-  const error = signInErrors.get(u.provider);
+  const error = actionErrors.get(u.provider);
   const action =
-    u.action === "sign_in"
-      ? `<button class="action" data-sign-in="${escape(u.provider)}">Sign in</button>` +
+    u.action === "turn_on"
+      ? `<button class="action" data-turn-on="${escape(u.provider)}">Turn on</button>` +
         (error ? `<p class="note">${escape(error)}</p>` : "")
       : "";
   return `<article class="card" data-stale="${u.stale}">
@@ -268,13 +268,13 @@ function render() {
 }
 
 usagePanel.addEventListener("click", (e) => {
-  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-sign-in]");
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-turn-on]");
   if (!button) return;
-  const provider = button.dataset.signIn!;
-  // The card fills in by itself once the sign-in finishes.
-  invoke("sign_in", { provider })
-    .then(() => signInErrors.delete(provider))
-    .catch((error) => signInErrors.set(provider, String(error)))
+  const provider = button.dataset.turnOn!;
+  // The card fills in by itself once the agent shares its usage.
+  invoke("turn_on_usage", { provider })
+    .then(() => actionErrors.delete(provider))
+    .catch((error) => actionErrors.set(provider, String(error)))
     .finally(render);
 });
 

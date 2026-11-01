@@ -1,5 +1,5 @@
 mod alerts;
-mod claude;
+mod claude_bridge;
 mod claude_desktop;
 mod claude_sessions;
 mod codex;
@@ -24,7 +24,7 @@ use tauri::{Manager, WindowEvent};
 
 use crate::history::{Period, ProviderHistory};
 use crate::model::Snapshot;
-use crate::monitor::{CheckNow, HistoryFile, SharedSnapshot};
+use crate::monitor::{CheckNow, ClaudePaths, HistoryFile, SharedSnapshot};
 use crate::settings::Settings;
 
 #[tauri::command]
@@ -38,13 +38,13 @@ fn set_context_limit(settings: tauri::State<Settings>, tokens: Option<u64>) {
     settings.set_context_limit(tokens);
 }
 
-/// Starts signing in to a provider whose usage card asked for it. Off the window's
-/// thread, since it looks for the agent and opens a terminal.
+/// Turns on usage for a provider whose usage card asked for it. Off the window's thread,
+/// since it edits the agent's settings file.
 #[tauri::command(async)]
-fn sign_in(provider: String) -> Result<(), String> {
+fn turn_on_usage(paths: tauri::State<ClaudePaths>, provider: String) -> Result<(), String> {
     match provider.as_str() {
-        "claude" => claude::sign_in(),
-        _ => Err(format!("Signing in to {provider} isn't supported.")),
+        "claude" => claude_bridge::turn_on(&paths.claude_home, &paths.bridge_dir),
+        _ => Err(format!("Turning on {provider} usage isn't supported.")),
     }
 }
 
@@ -130,6 +130,11 @@ fn resize_window(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Claude Code runs ACM as its status line to hand over usage; that run saves it and
+    // exits without opening anything.
+    if claude_bridge::run_from_args() {
+        return;
+    }
     tauri::Builder::default()
         // Must come first: opening the app again brings up the window that's already running.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -147,7 +152,7 @@ pub fn run() {
             get_history,
             set_context_limit,
             resize_window,
-            sign_in
+            turn_on_usage
         ])
         .setup(|app| {
             // A menu bar app on macOS, so no Dock icon next to the tray dot.

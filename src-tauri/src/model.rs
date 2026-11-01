@@ -116,7 +116,8 @@ pub enum UsageStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageAction {
-    SignIn,
+    /// Have the agent share its usage with ACM, which changes the agent's settings.
+    TurnOn,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
