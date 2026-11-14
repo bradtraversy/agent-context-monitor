@@ -485,8 +485,13 @@ fn bridge_command(exe: &Path, dir: &Path, previous: Option<&str>) -> String {
     let dir = quote(&dir.to_string_lossy());
     match previous {
         None => format!("{exe} {ARG} {dir}"),
-        // If ACM is ever removed, `cat` keeps the old status line working.
-        Some(previous) => format!("({exe} {ARG} {dir} {PASS_ARG} 2>/dev/null || cat) | {previous}"),
+        // If ACM is ever removed, `cat` keeps the old status line working. The old
+        // command goes in its own group so all of it gets the JSON, even when it's
+        // several commands joined with `;` or `&&`. The newline before `)` stops a
+        // trailing `# comment` from swallowing the bracket.
+        Some(previous) => {
+            format!("({exe} {ARG} {dir} {PASS_ARG} 2>/dev/null || cat) | ( {previous}\n)")
+        }
     }
 }
 
@@ -815,7 +820,7 @@ mod tests {
         assert_eq!(keys, ["theme", "statusLine", "model"]);
         let command = status_command(&settings).unwrap();
         assert!(is_ours(command));
-        assert!(command.ends_with("| ~/bin/mine.sh"));
+        assert!(command.ends_with("| ( ~/bin/mine.sh\n)"));
         assert_eq!(settings["statusLine"]["padding"], 2);
         // Turning on twice doesn't wrap it again.
         turn_on(&home, &dir).unwrap();
@@ -872,6 +877,34 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_status_line_made_of_several_commands_gets_all_the_json() {
+        let dir = temp("chain-several");
+        for previous in [
+            r#"input=$(cat); echo "$input" | wc -c"#,
+            "cd / && wc -c",
+            "wc -c # counts the bytes",
+        ] {
+            let command = bridge_command(Path::new("/nonexistent/acm"), &dir, Some(previous));
+            let out = std::process::Command::new("sh")
+                .args(["-c", &format!("printf hello | {command}")])
+                .output()
+                .unwrap();
+            let expected = if previous.starts_with("input") {
+                "6"
+            } else {
+                "5"
+            };
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                expected,
+                "{previous}"
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
