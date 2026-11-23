@@ -11,6 +11,7 @@ use crate::alerts::Alerts;
 
 use crate::claude_bridge::{self, ClaudeBridge};
 use crate::claude_sessions::ClaudeSessions;
+use crate::claude_windows::KnownWindows;
 use crate::codex::CodexSource;
 use crate::codex_live::CodexLive;
 use crate::copilot::CopilotSource;
@@ -93,6 +94,7 @@ pub fn start(app: AppHandle) {
         let recorded_reset = history::last_reset(&history_path, "claude");
         let mut claude = ClaudeBridge::new(bridge_dir, &claude_desktop, recorded_reset);
         let mut claude_sessions = ClaudeSessions::new(claude_home, desktop_sessions);
+        let mut claude_windows = KnownWindows::load(Some(data_dir.join("claude-windows.json")));
         let mut history = Recorder::open(history_path, SystemTime::now());
         loop {
             if !first_checks.all_done() && started.elapsed() < FIRST_CHECK_WAIT {
@@ -125,8 +127,25 @@ pub fn start(app: AppHandle) {
             history.record(&usage, now);
             let limit = app.state::<Settings>().context_limit();
             let mut chats = claude_sessions.chats(now);
+            for (model, peak) in claude_sessions.peaks() {
+                claude_windows.saw_usage(model, peak);
+            }
             for chat in &mut chats {
-                if let Some(window) = claude.context_window(&chat.id) {
+                if let (Some(window), Some(model)) = (claude.context_window(&chat.id), &chat.model)
+                {
+                    claude_windows.saw_window(model, window);
+                }
+            }
+            for chat in &mut chats {
+                // The status line reports a chat's own window. Chats without one, like the
+                // desktop app's, get the window their model has been seen to run with.
+                let window = claude.context_window(&chat.id).or_else(|| {
+                    let guessed = chat.context.as_ref().is_some_and(|c| c.window_guessed);
+                    guessed
+                        .then(|| chat.model.as_deref().and_then(|m| claude_windows.get(m)))
+                        .flatten()
+                });
+                if let Some(window) = window {
                     chat.context = chat.context.take().map(|c| c.with_window(window));
                 }
             }
