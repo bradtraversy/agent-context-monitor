@@ -2,6 +2,7 @@ mod alerts;
 mod claude_bridge;
 mod claude_desktop;
 mod claude_sessions;
+mod claude_windows;
 mod codex;
 mod codex_live;
 mod copilot;
