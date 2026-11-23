@@ -4,7 +4,9 @@
 //! Closed chats are found from transcripts written within the recent window.
 //! Context comes from the last assistant usage in the session transcript. Transcripts
 //! do not record the context window, so it is estimated from the model name, and
-//! only the token count is shown for models that aren't Claude.
+//! only the token count is shown for models that aren't Claude. A plain model name
+//! may run with 200k or 1M, so the monitor replaces that guess with what this
+//! computer has seen the model use (see `claude_windows`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,6 +16,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use crate::claude_desktop::{DesktopChats, PLACEHOLDER_TITLE};
+use crate::claude_windows::{ONE_MILLION, TWO_HUNDRED_K};
 
 #[cfg(test)]
 use crate::jsonl::consume_lines;
@@ -23,8 +26,6 @@ use crate::model::{
 };
 
 const PROVIDER: &str = "claude";
-const ONE_MILLION: u64 = 1_000_000;
-const TWO_HUNDRED_K: u64 = 200_000;
 /// Without Linux's process start times, a pid could belong to a newer process, so a
 /// registry entry not updated for this long is taken as left behind.
 #[cfg(not(target_os = "linux"))]
@@ -112,6 +113,8 @@ struct Transcript {
     modified: Option<SystemTime>,
     model: Option<String>,
     context: Option<ContextMeasure>,
+    /// The most context used on each model in this chat, compactions included.
+    peaks: HashMap<String, u64>,
     cwd: Option<String>,
     entrypoint: Option<String>,
     custom_title: Option<String>,
@@ -188,6 +191,13 @@ impl ClaudeSessions {
         }
         self.transcripts = transcripts;
         chats
+    }
+
+    /// The most context each model has used in the chats just listed.
+    pub fn peaks(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.transcripts
+            .values()
+            .flat_map(|t| t.peaks.iter().map(|(m, &p)| (m.as_str(), p)))
     }
 }
 
@@ -344,6 +354,10 @@ impl Transcript {
                 requested.as_deref(),
                 rec.timestamp.unwrap_or_default(),
             ));
+            if let Some(model) = &requested {
+                let peak = self.peaks.entry(model.clone()).or_default();
+                *peak = (*peak).max(used);
+            }
         }
         if requested.is_some() {
             self.model = requested;
@@ -552,6 +566,20 @@ mod tests {
         assert_eq!(ctx.context_window, Some(ONE_MILLION));
         assert_eq!(ctx.used_percent, Some(30.0));
         assert!(!ctx.window_guessed);
+    }
+
+    #[test]
+    fn the_most_context_used_survives_a_compaction() {
+        let boundary =
+            r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}"#;
+        let t = read(&[
+            assistant("claude-opus-5-5", 1, 450_000, ""),
+            boundary.to_string(),
+            assistant("claude-opus-5-5", 1, 30_000, ""),
+            assistant("claude-haiku-5-5", 1, 9, ""),
+        ]);
+        assert_eq!(t.peaks.get("claude-opus-5-5"), Some(&450_001));
+        assert_eq!(t.peaks.get("claude-haiku-5-5"), Some(&10));
     }
 
     #[test]
